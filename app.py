@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-Advanced NLP Text Corrector — PySide6 Edition (External Database)
-================================================================
+Advanced NLP Text Corrector — PySide6 Edition (Multi-DB + Logging + Robust Error Handling)
+==============================================================================
 Features:
-  • SQLite external database for dictionaries and language models
-  • Automatic database creation and seeding on first run
-  • Import external text corpora to expand dictionary & n-grams
+  • Isolated SQLite databases per language (./en/en.db, ./es/es.db, ./de/de.db)
+  • Strict relational database schema with indexes and metadata tracking
+  • Comprehensive Python logging (file + console)
+  • Robust error handling (DB constraints, IO errors, thread safety)
   • Spell checking via BK-tree & Levenshtein distance
   • Grammar checking with language-specific rules
-  • Multi-language support (English, Spanish, German)
   • Multiple correction strategies (Interactive, Beam Search, MCTS)
-  • Interactive error review (Accept / Ignore / Custom correction)
   • User dictionary management with database persistence
   • Dark / Light themes
-  • Real-time error highlighting & Statistics dashboard
 """
 
-import sys, re, os, json, heapq, random, string, time
+import sys, re, os, json, heapq, random, string, time, logging, traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Set
+from datetime import datetime
 import sqlite3
 
 from PySide6.QtWidgets import (
@@ -27,20 +26,42 @@ from PySide6.QtWidgets import (
     QTextEdit, QPushButton, QLabel, QTabWidget, QComboBox,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QLineEdit, QSpinBox, QCheckBox, QMessageBox,
-    QSplitter, QToolBar, QStatusBar, QProgressBar, QFrame,
-    QGridLayout, QSizePolicy, QScrollArea, QSlider, QAction,
-    QListWidget, QListWidgetItem, QAbstractItemView, QFormLayout,
-    QRadioButton, QButtonGroup, QToolButton, QMenu, QInputDialog
+    QSplitter, QToolBar, QStatusBar, QProgressBar,
+    QScrollArea, QFormLayout, QRadioButton, QListWidget, 
+    QListWidgetItem, QAbstractItemView, QInputDialog
 )
-from PySide6.QtCore import (
-    Qt, QThread, Signal, QSize, QTimer, QSettings
-)
-from PySide6.QtGui import (
-    QTextCharFormat, QColor, QFont, QTextCursor, QKeySequence
-)
+from PySide6.QtCore import Qt, QThread, Signal, QSettings
+from PySide6.QtGui import QTextCharFormat, QColor, QFont, QTextCursor, QKeySequence
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 1: Built-in Seed Dictionaries (Used only on 1st run)
+# SECTION 1: Logging Configuration
+# ═══════════════════════════════════════════════════════════════════
+
+LOG_FILE = "nlp_corrector.log"
+
+def setup_logging():
+    log_format = "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # File Handler (captures everything)
+    fh = logging.FileHandler(LOG_FILE, encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(log_format, date_format))
+    root_logger.addHandler(fh)
+    
+    # Console Handler (captures warnings and above)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter(log_format, date_format))
+    root_logger.addHandler(ch)
+
+logger = logging.getLogger("NLP_Corrector")
+
+# ═══════════════════════════════════════════════════════════════════
+# SECTION 2: Built-in Seed Dictionaries
 # ═══════════════════════════════════════════════════════════════════
 
 EN_SEED = "a able about above accept across act actually add afraid after afternoon again against age ago agree air all almost along already also always am among an and anger animal answer ant any anybody anymore anything anyplace anyway apart apartment appear apple are area arm army around arrive art as ask at attack attempt attend august aunt author autumn available away baby back bad bag ball ban band bank bar base basic basis bath be beach bean bear beat beautiful became because become bed been before began begin behind being believe bell belong below beside best better between beyond big bill bird birth bit bite black blame blank block blood blow blue board boat body bomb bond bone book border born both bother bottle bottom bound box boy brain branch brave bread break breath bridge brief bright bring broad broke brother brown brush build building burn bus business busy but buy by cabin cage cake call calm came camera camp can cap capital captain capture car card care careful carry case cash cast cat catch cause cell center central century certain chain chair chairman challenge champion chance change channel chapter character charge charm chart chase cheap check cheek cheese chest chicken chief child childhood chin chip choice choose church circle citizen city civil claim class clean clear click client climb clinical clock close cloth clothes cloud club clue cluster coach coal coast coat code coffee cold collar collect college colony color column combination come comfort command comment commit common communicate community company compare competition complete complex computer concern condition conduct confirm congress connect consider contact contain content contest continue control conversation cook cool cooperation copy core corner corporate correct cost could count counter country county couple courage course court cousin cover crack craft crash crazy cream create crime criminal crisis criteria critical crop cross crowd crucial cry cultural cup cure curious current curve custom customer cut cycle dad daily damage dance danger dare dark data date daughter day dead deal dear death debate decade decide decision deck declare decline deep defeat defend defense define definitely degree delay deliver demand democracy demonstrate deny department depend deploy depression derive describe desert deserve design desire desk despite destroy detail detect determine develop device devote dialogue did die diet differ digital dinner direct direction director dirty disappear discipline discover discuss discussion disease dish display distance distinct district disturb divide doctor document does dog dollar domestic door double down downtown draft drag drama dramatic draw drawing dream dress drink drive drop drug dry due during dust duty each eager ear early earn earth ease eastern easy eat economic economy edge edition editor education effect effective effort eight either elderly elect election electric element eliminate else emerge emergency emission emotion emphasis employ empty enable encounter encourage end enemy energy enforce engage engine engineer enjoy enormous enough ensure enter entire entry environment episode equal era error escape especially essay essential establish estate estimate evaluate even evening event eventually ever every evidence evil evolution exact examine example exceed exchange exciting exercise exhibit exist expand expect experience experiment expert explain explore export expose extend extension extensive extent external extra extreme eye face facility fact factor fail fair faith fall familiar family famous fan far farm farmer fascinate fashion fast fat fate father fault favor favorite fear feature federal fee feed feel fellow female fence few fiction field fifteen fight figure file fill film final finally find fine finger finish fire firm first fish fit five fix flag flame flat flee flesh flight flip float flood floor flow flower fly focus fold folk follow food foot football for force foreign forest forever forget form formal former formula forth fortune forward found foundation four fourth frame framework free freedom french frequency frequently fresh friend front fruit fuel full fun function fund funny furniture further future gain galaxy game gang gap garage garden gas gate gather gay gaze gear gender general generate genetic genius gentle gentleman get giant gift girl girlfriend give glad glance glass global glory go goal god gold golden golf gone good govern government governor grab grace grade gradually grand grandfather grandmother grant grass grave gray great green grew grip grocery ground group grow growth guarantee guard guess guest guide guilty guitar gun guy habit hair half hall hand handle hang happen happy harbor hard harm hat hate have he head headline health healthy hear hearing heart heat heavy height help her here hero herself hide high highlight hill him himself hip hire his historian historic historical history hit hold hole holiday home honest honor hope horrible horror horse hospital host hostile hot hotel hour house household housing how however huge human humor hundred hungry hunt hurry hurt husband ice idea ideal identify identity ignore ill illegal illustrate image imagination imagine immediate immediately immigrant impact implement implication imply import important impose impossible impress impression improve incident include income increase increasingly incredible indeed independence independent index indicate individual industrial industry infant infection inflation influence inform information initial initially inner innocent input inquiry inside insist install instance instead institution instrument insurance intellectual intend intense intention interest interesting internal internet interpret interview into introduce invasion invest investigate investment investor invisible involve iron island isolate issue it item its itself jacket jail japanese jet jew jewish job join joint joke journal journalist journey joy judge judgment juice jump junior jury just justice justify keen keep key kid kill kind king kiss kit kitchen knee knife knock know knowledge known lab label labor lack lady lake land landscape language large largely last late lately later latin latter laugh launch law lawn lawsuit lawyer lay layer lead leader leadership leaf league lean learn least leather leave led left leg legal legend lemon length less lesson let letter level liberal library license lid lie life lifestyle lift light like likely limit line link lion lip list listen literally literary literature little live living load loan local locate location lock long look lord lose loss lost lot loud love lovely lover low lower luck lunch lung machine mad magazine mail main maintain major majority make maker male mall man manage management manager manner manufacturer many map margin mark market marriage married marry mask mass massive master match material math matter may maybe mayor me meal mean meaning measure meat mechanism media medical medicine medium meet member membership memory mental mention mentor menu mere merely message metal method middle might military milk million mind mine minister minor minority minute miracle mirror miss mission mistake mix mixture mm-hmm model moderate modern modest mom moment money monitor month mood moon moral more morning mortgage most mostly mother motion mount mountain mouse mouth move movement movie much multiple murder muscle museum music musical muslim must mutual my myself mystery myth nail name narrative narrow nation national natural naturally nature near nearly necessarily necessary neck need negative negotiate negotiation neighbor neighborhood neither nerve nervous net network never nevertheless new newly news newspaper next nice night nine nobody nod noise nor normal normally north northern nose not note nothing notice notion novel now nowhere number numerous nurse nut object objection obligation observation observe obvious obviously occasion occupy occur ocean odd odds off offense offensive offer office officer official often oil ok okay old olympic on once one ongoing online only onto open opening operate operation operator opinion opponent opportunity oppose opposite opposition option or orange order ordinary organ organic organization orient origin original other otherwise ought our ourselves out outcome outside overall overcome overlook owe own owner pace pack package page paid pain paint painting pair pale palm pan panel panic paper parent park parking part partially participate particular particularly partly partner partnership party pass passage passenger passion past patch path patient pattern pause pay payment peace peak peer penalty people per perceive percent percentage perception perfect perfectly perform performance perhaps period permanent permission permit person personal personality personally perspective phase philosophy phone photo photograph phrase physical physically physician piano pick picture pie piece pile pilot pine pink pipe pitch place plan plane planet planning plant plastic plate platform play player please pleasure plenty plus pocket poem poet poetry point pole police policy political politically pollution pool poor pop popular population porch port portion portrait pose position positive possibility possible possibly post pot potato potential potentially pound pour poverty power powerful practical practice pray prayer precisely predict prefer preference pregnancy preparation prepare presence present presentation preserve presidency president presidential press pressure pretend pretty prevent previous previously price primarily primary prime principal principle print printer prior priority prison prisoner privacy private probably problem procedure proceed process produce producer product production profession professional professor profit program progress project prominent promise promote proper properly property proportion proposal propose prospect protect protection protein protest proud prove provide provider province provision psychological public publication publicly pull punch purchase pure purple purpose pursue push put qualify quality quarter quarterback queen question quick quickly quiet quietly quit quite quote race racial racism racist rack radical radio rage rail rain raise range rank rapid rapidly rare rarely rate rather reach react reaction read reader reading ready real realistic reality realize really reason reasonable rebel recall receive recent recently recognition recognize recommend record recover recovery recruit red reduce reduction reflect reflection reform regard regime region regional register regular regulation reinforce reject relate relation relationship relative relatively release relevant relief religion religious reluctant rely remain remaining remarkable remember remind remote remove repeat repeatedly replace reply report reporter represent representation republican reputation request require research researcher resemble reservation resident resist resolution resolve resort resource respond response responsibility responsible rest restaurant restore restriction result retain retire return reveal revenue review revolution rhythm rice rich rid ride rifle right ring rise risk river road rock role roll romantic roof room root rope rose rough roughly round route row royal rub rule run running rural rush sacred sacrifice sad safe safety sake salary sale salt same sample sanction sand satellite satisfaction satisfy sauce save saving say scale scandal scene schedule scholar scholarship school science scientific scientist scope score screen sea search season seat second secondary secret secretary section sector secure security seed seek seem segment seize select selection self sell senate senator senior sense sensitive sentence separate sequence series serious seriously serve service session set setting settle settlement seven several severe sexual shake shall shape share sharp she sheet shelf shell shelter shift shine ship shirt shock shoe shoot shooting shop shopping shore short shortage shot should shoulder shout show shower shut sick side sight sign signal significance significant significantly silence silent silver similar similarly simple simply simultaneously since sing singer single sir sister sit site situation six size ski skill skin sky slave slavery sleep slice slide slight slightly slip slow slowly small smart smell smile smoke smooth snap so so-called soccer social society soft software soil solar soldier solid solution solve somebody somehow someone something sometimes somewhat somewhere son song soon sophisticated sorry sort soul sound source south southeast southern soviet space spanish speak speaker special specialist species specific specifically speech speed spend spent spin spirit spiritual split spokesman sport spot spread spring spy square squeeze stability stable staff stage stair stake stand standard standing star stare start starting state statement station status stay steady steal steam steel steep stem step stick still stock stomach stone stop storage store storm story straight strange stranger strategic strategy stream street strength stress stretch strict strike string strip stroke strong strongly structure struggle student studio study stuff stupid style subject submit substantial succeed success successful successfully such suddenly suffer sufficient sugar suggest suit summer sun super supply support supporter suppose sure surely surface surgery surprise surprisingly surround surrounding survey survival survive suspect suspend suspicion sustain swallow swear sweet swim swing switch symbol symptom system table tackle tactic tail take tale talent talk tall tank tape target task taste tax taxpayer tea teach teacher teaching team tear technique technology television tell temperature temporary ten tend tendency term terms terrible test testify testimony testing text than thank that the theater their them theme themselves then theory therapy there therefore these they thick thin thing think thinking third thirty this those though thought thousand threat threaten three throat through throughout throw thus ticket tie tight till time tiny tip tire tired title to today toe together tomorrow tone tonight too tool top topic toss total totally touch tough tour tourist toward towards tower town toy trace track trade tradition traditional traffic trail train training trait transfer transform transformation transition translate transmission transport trap travel treat treatment treaty tree tremendous trend trial tribe trick trip trouble truck true truly trust truth try tube tunnel turn tv twelve twenty twice twin two type typical typically ugly ultimate ultimately unable uncle under undergo understand understanding unemployment unfold unfortunately unhappy uniform union unique unit united universe university unknown unless unlike unlikely until unusual up upon upper urban urge us use used useful user usual usually vacation valley valuable value variable variation variety various vast vehicle venture version versus very veteran via victim victory video view village violation violence virtual virtually visible vision visit visitor visual vital voice volume voluntary volunteer vote voter vulnerable wage wait wake walk wall wander want war warning wash waste watch water wave way weak weakness wealth weapon wear weather web website wedding week weekend weigh weight welcome welfare well west western wet what whatever wheel when whenever where whereas wherever whether which while whisper white who whole whom whose why wide widely widespread wife wild will willing win wind window wine wing winner winter wire wisdom wise wish with withdraw without witness woman women wonder wonderful wood wooden word work worker working works workshop world worried worry worse worst worth worthy would wound wrap write writer writing wrong yard yeah year yell yellow yes yesterday yet yield you young youngster your yourself youth zone".split()
@@ -49,15 +70,17 @@ ES_SEED = "a al ahora algo algunos ante antes apellido aquél aquí así aunque 
 
 DE_SEED = "aber alle als am an auch auf aus bei bin bis bist da dann das dem den der des die dieser du durch ein eine einem einer es für gegen hat habe haben hier ich ihm ihn ihm in ist ja je kann keine können man mehr mich mir mit nach nicht nichts nun nur oder ohne so soll seine seinem seiner sich sie sind so etwas um und uns unter vom von vor war was wenn wer wie wir wird wo zu zum zur gehen geht ging zur schule kauft ein apfel ist auf tisch und gestern sie".split()
 
+SEED_MAP = {"en": EN_SEED, "es": ES_SEED, "de": DE_SEED}
+
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 2: NLP Engine — Levenshtein & BK-Tree
+# SECTION 3: NLP Engine — Levenshtein & BK-Tree
 # ═══════════════════════════════════════════════════════════════════
 
 def levenshtein(a: str, b: str) -> int:
+    if not a: return len(b)
+    if not b: return len(a)
     n, m = len(a), len(b)
-    if n == 0: return m
-    if m == 0: return n
     dp = [[0] * (m + 1) for _ in range(n + 1)]
     for i in range(n + 1): dp[i][0] = i
     for j in range(m + 1): dp[0][j] = j
@@ -110,204 +133,257 @@ class BKTree:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 3: SQLite Database Manager
+# SECTION 4: Per-Language Database Manager
 # ═══════════════════════════════════════════════════════════════════
 
 class DatabaseManager:
-    """Manages all SQLite operations for dictionaries and language models."""
-    def __init__(self, db_path: str = "nlp_corrector.db"):
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self._init_tables()
-        self._seed_if_empty()
+    """Manages a dedicated SQLite database for a single language inside its own folder."""
+    def __init__(self, lang_code: str):
+        self.lang_code = lang_code
+        self.db_dir = os.path.join(os.getcwd(), lang_code)
+        self.db_path = os.path.join(self.db_dir, f"{lang_code}.db")
+        self.conn = None
+        self._init_db_structure()
 
-    def _init_tables(self):
-        c = self.conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS languages (
-                        code TEXT PRIMARY KEY, name TEXT)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS dictionary (
-                        lang TEXT, word TEXT, freq INTEGER, is_user INTEGER DEFAULT 0,
-                        PRIMARY KEY (lang, word))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS bigrams (
-                        lang TEXT, w1 TEXT, w2 TEXT, freq INTEGER,
-                        PRIMARY KEY (lang, w1, w2))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS trigrams (
-                        lang TEXT, w1 TEXT, w2 TEXT, w3 TEXT, freq INTEGER,
-                        PRIMARY KEY (lang, w1, w2, w3))""")
-        self.conn.commit()
+    def _init_db_structure(self):
+        """Create directory, connect to DB, and enforce strict schema."""
+        logger.info(f"Initializing database for '{self.lang_code}' at: {self.db_path}")
+        try:
+            os.makedirs(self.db_dir, exist_ok=True)
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            cursor = self.conn.cursor()
 
-    def _seed_if_empty(self):
-        c = self.conn.cursor()
-        c.execute("SELECT COUNT(*) FROM languages")
-        if c.fetchone()[0] == 0:
-            seeds = {"en": ("English", EN_SEED), "es": ("Spanish", ES_SEED), "de": ("German", DE_SEED)}
-            for code, (name, words) in seeds.items():
-                c.execute("INSERT INTO languages (code, name) VALUES (?, ?)", (code, name))
-                freq = Counter(words)
-                for word, count in freq.items():
-                    c.execute("INSERT OR IGNORE INTO dictionary (lang, word, freq, is_user) VALUES (?, ?, ?, 0)",
-                              (code, word, count))
+            # Metadata Table
+            cursor.execute("""CREATE TABLE IF NOT EXISTS metadata (
+                                key TEXT PRIMARY KEY, 
+                                value TEXT NOT NULL)""")
+
+            # Dictionary Table
+            cursor.execute("""CREATE TABLE IF NOT EXISTS dictionary (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                word TEXT NOT NULL UNIQUE,
+                                freq INTEGER NOT NULL DEFAULT 1,
+                                is_user INTEGER NOT NULL DEFAULT 0,
+                                created_at TEXT NOT NULL,
+                                updated_at TEXT NOT NULL)""")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dict_word ON dictionary(word)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dict_user ON dictionary(is_user)")
+
+            # Bigrams Table
+            cursor.execute("""CREATE TABLE IF NOT EXISTS bigrams (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                w1 TEXT NOT NULL,
+                                w2 TEXT NOT NULL,
+                                freq INTEGER NOT NULL DEFAULT 1,
+                                UNIQUE(w1, w2))""")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_bigrams_w1 ON bigrams(w1)")
+
+            # Trigrams Table
+            cursor.execute("""CREATE TABLE IF NOT EXISTS trigrams (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                w1 TEXT NOT NULL,
+                                w2 TEXT NOT NULL,
+                                w3 TEXT NOT NULL,
+                                freq INTEGER NOT NULL DEFAULT 1,
+                                UNIQUE(w1, w2, w3))""")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trigrams_w1w2 ON trigrams(w1, w2)")
+
             self.conn.commit()
+            
+            # Seed if empty
+            cursor.execute("SELECT COUNT(*) FROM dictionary")
+            if cursor.fetchone()[0] == 0:
+                logger.info(f"Database empty for '{self.lang_code}'. Seeding with built-in dictionary...")
+                self._seed_database()
+            else:
+                logger.debug(f"Database for '{self.lang_code}' already populated.")
 
-    def load_words(self, lang: str) -> Dict[str, int]:
-        c = self.conn.cursor()
-        c.execute("SELECT word, freq FROM dictionary WHERE lang=?", (lang,))
-        return {row[0]: row[1] for row in c.fetchall()}
+        except sqlite3.Error as e:
+            logger.critical(f"Database initialization failed for '{self.lang_code}': {e}\n{traceback.format_exc()}")
+            raise RuntimeError(f"Database init error: {e}")
+        except Exception as e:
+            logger.critical(f"Unexpected error initializing DB for '{self.lang_code}': {e}\n{traceback.format_exc()}")
+            raise
 
-    def load_user_words(self, lang: str) -> Set[str]:
-        c = self.conn.cursor()
-        c.execute("SELECT word FROM dictionary WHERE lang=? AND is_user=1", (lang,))
-        return {row[0] for row in c.fetchall()}
+    def _seed_database(self):
+        words = SEED_MAP.get(self.lang_code, [])
+        if not words: return
+        now = datetime.utcnow().isoformat()
+        freq = Counter(words)
+        try:
+            with self.conn:
+                self.conn.executemany(
+                    """INSERT INTO dictionary (word, freq, is_user, created_at, updated_at) 
+                       VALUES (?, ?, 0, ?, ?)
+                       ON CONFLICT(word) DO UPDATE SET freq = freq + ?, updated_at = ?""",
+                    [(w, f, now, now, f, now) for w, f in freq.items()]
+                )
+                self._upsert_ngrams_internal(words)
+        except sqlite3.Error as e:
+            logger.error(f"Seeding database failed: {e}")
 
-    def load_bigrams(self, lang: str) -> Dict[str, Counter]:
-        c = self.conn.cursor()
-        c.execute("SELECT w1, w2, freq FROM bigrams WHERE lang=?", (lang,))
-        counts = defaultdict(Counter)
-        for w1, w2, freq in c.fetchall():
-            counts[w1][w2] = freq
-        return counts
-
-    def load_trigrams(self, lang: str) -> Counter:
-        c = self.conn.cursor()
-        c.execute("SELECT w1, w2, w3, freq FROM trigrams WHERE lang=?", (lang,))
-        counts = Counter()
-        for w1, w2, w3, freq in c.fetchall():
-            counts[(w1, w2, w3)] = freq
-        return counts
-
-    def add_word(self, lang: str, word: str):
-        word = word.lower().strip()
-        if not word: return
-        c = self.conn.cursor()
-        # Try to increment freq, if not exists insert as user word
-        c.execute("UPDATE dictionary SET freq = freq + 1, is_user = 1 WHERE lang=? AND word=?", (lang, word))
-        if c.rowcount == 0:
-            c.execute("INSERT INTO dictionary (lang, word, freq, is_user) VALUES (?, ?, 1, 1)", (lang, word))
-        self.conn.commit()
-
-    def remove_user_word(self, lang: str, word: str):
-        word = word.lower().strip()
-        c = self.conn.cursor()
-        c.execute("DELETE FROM dictionary WHERE lang=? AND word=? AND is_user=1", (lang, word))
-        self.conn.commit()
-
-    def import_corpus(self, lang: str, text: str):
-        """Parses raw text, updates dictionary, bigrams, and trigrams in DB."""
-        tokens = re.findall(r'\w+', text.lower())
-        if not tokens: return
-
-        word_freq = Counter(tokens)
+    def _upsert_ngrams_internal(self, tokens: List[str]):
+        """Helper to calculate and upsert ngrams during import/seed."""
         bigram_freq = Counter(zip(tokens, tokens[1:]))
         trigram_freq = Counter(zip(tokens, tokens[1:], tokens[2:]))
-
-        c = self.conn.cursor()
         
-        # Upsert Words
-        for word, freq in word_freq.items():
-            c.execute("""INSERT INTO dictionary (lang, word, freq, is_user) 
-                         VALUES (?, ?, ?, 0)
-                         ON CONFLICT(lang, word) DO UPDATE SET freq = freq + ?""",
-                      (lang, word, freq, freq))
+        self.conn.executemany(
+            """INSERT INTO bigrams (w1, w2, freq) VALUES (?, ?, ?)
+               ON CONFLICT(w1, w2) DO UPDATE SET freq = freq + ?""",
+            [(w1, w2, f, f) for (w1, w2), f in bigram_freq.items()]
+        )
+        self.conn.executemany(
+            """INSERT INTO trigrams (w1, w2, w3, freq) VALUES (?, ?, ?, ?)
+               ON CONFLICT(w1, w2, w3) DO UPDATE SET freq = freq + ?""",
+            [(w1, w2, w3, f, f) for (w1, w2, w3), f in trigram_freq.items()]
+        )
 
-        # Upsert Bigrams
-        for (w1, w2), freq in bigram_freq.items():
-            c.execute("""INSERT INTO bigrams (lang, w1, w2, freq) 
-                         VALUES (?, ?, ?, ?)
-                         ON CONFLICT(lang, w1, w2) DO UPDATE SET freq = freq + ?""",
-                      (lang, w1, w2, freq, freq))
+    def load_words(self) -> Dict[str, int]:
+        try:
+            cursor = self.conn.execute("SELECT word, freq FROM dictionary")
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            logger.error(f"Failed to load words for '{self.lang_code}': {e}")
+            return {}
 
-        # Upsert Trigrams
-        for (w1, w2, w3), freq in trigram_freq.items():
-            c.execute("""INSERT INTO trigrams (lang, w1, w2, w3, freq) 
-                         VALUES (?, ?, ?, ?, ?)
-                         ON CONFLICT(lang, w1, w2, w3) DO UPDATE SET freq = freq + ?""",
-                      (lang, w1, w2, w3, freq, freq))
+    def load_user_words(self) -> Set[str]:
+        try:
+            cursor = self.conn.execute("SELECT word FROM dictionary WHERE is_user=1")
+            return {row[0] for row in cursor.fetchall()}
+        except sqlite3.Error as e:
+            logger.error(f"Failed to load user words for '{self.lang_code}': {e}")
+            return set()
 
-        self.conn.commit()
+    def load_bigrams(self) -> Dict[str, Counter]:
+        try:
+            cursor = self.conn.execute("SELECT w1, w2, freq FROM bigrams")
+            counts = defaultdict(Counter)
+            for w1, w2, freq in cursor.fetchall(): counts[w1][w2] = freq
+            return counts
+        except sqlite3.Error as e:
+            logger.error(f"Failed to load bigrams for '{self.lang_code}': {e}")
+            return defaultdict(Counter)
+
+    def load_trigrams(self) -> Counter:
+        try:
+            cursor = self.conn.execute("SELECT w1, w2, w3, freq FROM trigrams")
+            counts = Counter()
+            for w1, w2, w3, freq in cursor.fetchall(): counts[(w1, w2, w3)] = freq
+            return counts
+        except sqlite3.Error as e:
+            logger.error(f"Failed to load trigrams for '{self.lang_code}': {e}")
+            return Counter()
+
+    def add_word(self, word: str):
+        word = word.lower().strip()
+        if not word: return
+        now = datetime.utcnow().isoformat()
+        try:
+            with self.conn:
+                self.conn.execute(
+                    """INSERT INTO dictionary (word, freq, is_user, created_at, updated_at) 
+                       VALUES (?, 1, 1, ?, ?)
+                       ON CONFLICT(word) DO UPDATE SET freq = freq + 1, is_user = 1, updated_at = ?""",
+                    (word, now, now, now)
+                )
+        except sqlite3.Error as e:
+            logger.error(f"Failed to add word '{word}': {e}")
+
+    def remove_user_word(self, word: str):
+        word = word.lower().strip()
+        try:
+            with self.conn:
+                self.conn.execute("DELETE FROM dictionary WHERE word=? AND is_user=1", (word,))
+        except sqlite3.Error as e:
+            logger.error(f"Failed to remove word '{word}': {e}")
+
+    def import_corpus(self, text: str):
+        tokens = re.findall(r'\w+', text.lower())
+        if not tokens: 
+            logger.warning("No tokens found in corpus to import.")
+            return
+
+        word_freq = Counter(tokens)
+        now = datetime.utcnow().isoformat()
+        
+        logger.info(f"Importing corpus into '{self.lang_code}' DB. Tokens: {len(tokens)}")
+        try:
+            with self.conn:
+                # Upsert Words
+                self.conn.executemany(
+                    """INSERT INTO dictionary (word, freq, is_user, created_at, updated_at) 
+                       VALUES (?, ?, 0, ?, ?)
+                       ON CONFLICT(word) DO UPDATE SET freq = freq + ?, updated_at = ?""",
+                    [(w, f, now, now, f, now) for w, f in word_freq.items()]
+                )
+                # Upsert N-Grams
+                self._upsert_ngrams_internal(tokens)
+            logger.info(f"Corpus successfully imported to '{self.lang_code}'.")
+        except sqlite3.Error as e:
+            logger.error(f"Corpus import failed for '{self.lang_code}': {e}\n{traceback.format_exc()}")
+            raise RuntimeError(f"Database error during import: {e}")
+
+    def get_db_size_mb(self) -> float:
+        try:
+            return os.path.getsize(self.db_path) / (1024 * 1024)
+        except OSError:
+            return 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 4: Language Profile & Advanced Text Corrector
+# SECTION 5: Language Profile & Advanced Text Corrector
 # ═══════════════════════════════════════════════════════════════════
 
 class LanguageProfile:
-    def __init__(self, lang_code: str, db: DatabaseManager):
+    def __init__(self, lang_code: str):
         self.lang_code = lang_code
-        self.db = db
-        
-        # Load from Database
-        self.words_freq: Dict[str, int] = db.load_words(lang)
-        self.words: Set[str] = set(self.words_freq.keys())
-        self.user_words: Set[str] = db.load_user_words(lang)
-        
+        self.db = DatabaseManager(lang_code)
+        self.words_freq: Dict[str, int] = {}
+        self.words: Set[str] = set()
+        self.user_words: Set[str] = set()
         self.bk = BKTree()
-        self.bk.build_from_list(list(self.words))
-        
-        self.bigram_counts: Dict[str, Counter] = db.load_bigrams(lang)
-        self.trigram_counts: Counter = db.load_trigrams(lang)
-        
+        self.bigram_counts: Dict[str, Counter] = defaultdict(Counter)
+        self.trigram_counts: Counter = Counter()
         self.grammar_rules = self._init_grammar_rules()
-        self.contractions = self._init_contractions()
+        self.refresh_from_db()
 
     def refresh_from_db(self):
-        """Reload data and rebuild BK-Tree after database changes."""
-        self.words_freq = self.db.load_words(self.lang_code)
+        logger.debug(f"Refreshing language profile from DB for '{self.lang_code}'")
+        self.words_freq = self.db.load_words()
         self.words = set(self.words_freq.keys())
-        self.user_words = self.db.load_user_words(self.lang_code)
+        self.user_words = self.db.load_user_words()
         self.bk = BKTree()
         self.bk.build_from_list(list(self.words))
-        self.bigram_counts = self.db.load_bigrams(self.lang_code)
-        self.trigram_counts = self.db.load_trigrams(self.lang_code)
-
-    def _init_contractions(self) -> Dict[str, str]:
-        if self.lang_code == "en":
-            return {
-                "dont": "do not", "won't": "will not", "can't": "cannot",
-                "im": "i am", "youre": "you are", "theyre": "they are",
-                "its": "it is", "lets": "let us",
-            }
-        return {}
+        self.bigram_counts = self.db.load_bigrams()
+        self.trigram_counts = self.db.load_trigrams()
 
     def _init_grammar_rules(self) -> List[Dict]:
         rules = []
         if self.lang_code == "en":
             rules.extend([
-                {
-                    "pattern": re.compile(r'\b(your)\s+(going|coming|doing|being|making|having)\b', re.IGNORECASE),
-                    "message": "Did you mean 'you're' (you are)?",
-                    "replacement": r"you're \2"
-                },
-                {
-                    "pattern": re.compile(r'\b(the)\s+(the)\b', re.IGNORECASE),
-                    "message": "Repeated word detected.",
-                    "replacement": r"the"
-                },
-                {
-                    "pattern": re.compile(r'\b(a)\s+([aeiou]\w+)', re.IGNORECASE),
-                    "message": "Use 'an' before vowel sounds.",
-                    "replacement": r"an \2"
-                },
+                {"pattern": re.compile(r'\b(your)\s+(going|coming|doing|being|making|having)\b', re.IGNORECASE), "message": "Did you mean 'you're' (you are)?", "replacement": r"you're \2"},
+                {"pattern": re.compile(r'\b(the)\s+(the)\b', re.IGNORECASE), "message": "Repeated word detected.", "replacement": r"the"},
+                {"pattern": re.compile(r'\b(a)\s+([aeiou]\w+)', re.IGNORECASE), "message": "Use 'an' before vowel sounds.", "replacement": r"an \2"},
             ])
         elif self.lang_code == "de":
-            rules.append({
-                "pattern": re.compile(r'\b(und)\s+(und)\b', re.IGNORECASE),
-                "message": "Wiederholtes Wort.",
-                "replacement": r"und"
-            })
+            rules.append({"pattern": re.compile(r'\b(und)\s+(und)\b', re.IGNORECASE), "message": "Wiederholtes Wort.", "replacement": r"und"})
         return rules
 
 
 class TextCorrector:
-    def __init__(self, db_path: str = "nlp_corrector.db"):
-        self.db = DatabaseManager(db_path)
+    def __init__(self):
         self.profiles: Dict[str, LanguageProfile] = {}
         self.current_lang = "en"
         self._build_profiles()
 
     def _build_profiles(self):
         for code in ["en", "es", "de"]:
-            self.profiles[code] = LanguageProfile(code, self.db)
+            try:
+                self.profiles[code] = LanguageProfile(code)
+            except Exception as e:
+                logger.critical(f"Failed to build profile for {code}: {e}")
 
     def set_language(self, lang: str):
         self.current_lang = lang
@@ -316,37 +392,48 @@ class TextCorrector:
         lang = lang or self.current_lang
         word = word.lower().strip()
         if not word: return "Empty word."
-        self.db.add_word(lang, word)
-        self.profiles[lang].refresh_from_db()
-        return f"✓ '{word}' added to {lang.upper()} dictionary."
+        try:
+            self.profiles[lang].db.add_word(word)
+            self.profiles[lang].refresh_from_db()
+            logger.info(f"Added word '{word}' to {lang}")
+            return f"✓ '{word}' added to {lang.upper()} dictionary."
+        except Exception as e:
+            logger.error(f"Error adding word: {e}")
+            return f"Error adding word: {e}"
 
     def remove_word(self, word: str, lang: str = None) -> str:
         lang = lang or self.current_lang
         word = word.lower().strip()
-        if word in self.profiles[lang].user_words:
-            self.db.remove_user_word(lang, word)
-            self.profiles[lang].refresh_from_db()
-            return f"✓ '{word}' removed from {lang.upper()} user dict."
-        return f"'{word}' not in user dict."
+        try:
+            if word in self.profiles[lang].user_words:
+                self.profiles[lang].db.remove_user_word(word)
+                self.profiles[lang].refresh_from_db()
+                logger.info(f"Removed word '{word}' from {lang}")
+                return f"✓ '{word}' removed from {lang.upper()} user dict."
+            return f"'{word}' not in user dict."
+        except Exception as e:
+            logger.error(f"Error removing word: {e}")
+            return f"Error removing word: {e}"
 
     def import_corpus(self, file_path: str, lang: str = None):
         lang = lang or self.current_lang
         try:
             text = Path(file_path).read_text(encoding='utf-8')
-            self.db.import_corpus(lang, text)
+            self.profiles[lang].db.import_corpus(text)
             self.profiles[lang].refresh_from_db()
             return True, f"Imported corpus to {lang.upper()}. DB updated."
+        except IOError as e:
+            logger.error(f"File read error: {e}")
+            return False, f"Failed to read file: {e}"
         except Exception as e:
-            return False, f"Failed to import: {e}"
+            logger.error(f"Import error: {e}")
+            return False, f"Import failed: {e}"
 
     @staticmethod
     def tokenize(text: str) -> List[Dict]:
         tokens = []
         for m in re.finditer(r"\w+|[^\w\s]|\s+", text, re.UNICODE):
-            tokens.append({
-                "text": m.group(), "start": m.start(), "end": m.end(),
-                "is_word": bool(re.fullmatch(r"\w+", m.group())),
-            })
+            tokens.append({"text": m.group(), "start": m.start(), "end": m.end(), "is_word": bool(re.fullmatch(r"\w+", m.group()))})
         return tokens
 
     def generate_candidates(self, word: str, max_edit: int = 2, top_k: int = 8) -> List[str]:
@@ -361,12 +448,7 @@ class TextCorrector:
                     
         letters = string.ascii_lowercase
         splits = [(lw[:i], lw[i:]) for i in range(len(lw) + 1)]
-        edits1 = set(
-            [L + R[1:] for L, R in splits if R] +
-            [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1] +
-            [L + c + R[1:] for L, R in splits if R for c in letters] +
-            [L + c + R for L, R in splits for c in letters]
-        )
+        edits1 = set([L + R[1:] for L, R in splits if R] + [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1] + [L + c + R[1:] for L, R in splits if R for c in letters] + [L + c + R for L, R in splits for c in letters])
         for w in edits1:
             if w in profile.words: cand_set.add(w)
                 
@@ -401,22 +483,13 @@ class TextCorrector:
             
             candidates = self.generate_candidates(word)
             best = self._rank_candidates(lw, candidates, prev_word)
-            errors.append({
-                "type": "spelling", "start": tok["start"], "end": tok["end"],
-                "original": word, "suggestion": best,
-                "message": f"Unknown word. Did you mean '{best}'?",
-                "all_candidates": candidates[:5],
-            })
+            errors.append({"type": "spelling", "start": tok["start"], "end": tok["end"], "original": word, "suggestion": best, "message": f"Unknown word. Did you mean '{best}'?", "all_candidates": candidates[:5]})
             prev_word = lw
 
         for rule in profile.grammar_rules:
             for m in rule["pattern"].finditer(text):
                 suggestion = m.expand(rule["replacement"])
-                errors.append({
-                    "type": "grammar", "start": m.start(), "end": m.end(),
-                    "original": m.group(), "suggestion": suggestion,
-                    "message": rule["message"], "all_candidates": [suggestion],
-                })
+                errors.append({"type": "grammar", "start": m.start(), "end": m.end(), "original": m.group(), "suggestion": suggestion, "message": rule["message"], "all_candidates": [suggestion]})
 
         errors.sort(key=lambda e: e["start"])
         return errors
@@ -436,8 +509,7 @@ class TextCorrector:
             for seq, score in beams:
                 for cand in cands:
                     if len(seq) >= 2:
-                        tri = (seq[-2], seq[-1], cand)
-                        reward = (profile.trigram_counts.get(tri, 0) + 1) / total_tri
+                        reward = (profile.trigram_counts.get((seq[-2], seq[-1], cand), 0) + 1) / total_tri
                     elif len(seq) >= 1:
                         reward = (profile.bigram_counts.get(seq[-1], {}).get(cand, 0) + 1) / max(sum(profile.bigram_counts.get(seq[-1], {}).values()), 1)
                     else:
@@ -476,8 +548,7 @@ class TextCorrector:
         return freq_score - 10 * grammar_penalty
 
     def _reconstruct(self, all_tokens, word_tokens, new_words) -> str:
-        result = []
-        wi = 0
+        result, wi = [], 0
         for tok in all_tokens:
             if tok["is_word"] and wi < len(new_words):
                 replacement = self._preserve_case(tok["text"], new_words[wi])
@@ -518,7 +589,7 @@ class TextCorrector:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 5: Worker Threads
+# SECTION 6: Worker Thread
 # ═══════════════════════════════════════════════════════════════════
 
 class CorrectionWorker(QThread):
@@ -541,11 +612,12 @@ class CorrectionWorker(QThread):
                 ok, msg = self.corrector.import_corpus(self.kwargs["path"])
                 self.finished.emit({"import_ok": ok, "import_msg": msg})
         except Exception as e:
+            logger.error(f"Worker Thread Error: {e}\n{traceback.format_exc()}")
             self.finished.emit({"error": str(e)})
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 6: Custom Widgets
+# SECTION 7: Custom Widgets
 # ═══════════════════════════════════════════════════════════════════
 
 class HighlightTextEdit(QTextEdit):
@@ -631,7 +703,7 @@ class ErrorTableWidget(QTableWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 7: Styles
+# SECTION 8: Styles & Main Window
 # ═══════════════════════════════════════════════════════════════════
 
 DARK_STYLE = """
@@ -677,7 +749,6 @@ QPushButton#primaryBtn { background-color: #1e66f5; color: #ffffff; }
 QPushButton#dangerBtn { background-color: #d20f39; color: #ffffff; }
 QPushButton#successBtn { background-color: #40a02b; color: #ffffff; }
 QComboBox { background-color: #ffffff; color: #4c4f69; border: 1px solid #bcc0cc; border-radius: 4px; padding: 4px 8px; }
-QComboBox QAbstractItemView { background-color: #ffffff; color: #4c4f69; selection-background-color: #ccd0da; }
 QTabWidget::pane { border: 1px solid #bcc0cc; border-radius: 6px; }
 QTabBar::tab { background-color: #e6e9ef; color: #4c4f69; padding: 8px 20px; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }
 QTabBar::tab:selected { background-color: #ccd0da; font-weight: bold; }
@@ -686,7 +757,6 @@ QHeaderView::section { background-color: #e6e9ef; color: #4c4f69; padding: 6px; 
 QGroupBox { border: 1px solid #bcc0cc; border-radius: 8px; margin-top: 12px; padding-top: 16px; font-weight: bold; }
 QLabel#statsLabel { background-color: #e6e9ef; border-radius: 6px; padding: 6px 12px; }
 QListWidget { background-color: #ffffff; color: #4c4f69; border: 1px solid #bcc0cc; border-radius: 6px; }
-QListWidget::item:selected { background-color: #ccd0da; }
 QStatusBar { background-color: #e6e9ef; color: #6c6f85; border-top: 1px solid #bcc0cc; }
 QToolBar { background-color: #e6e9ef; border-bottom: 1px solid #bcc0cc; spacing: 6px; padding: 4px; }
 QProgressBar { border: 1px solid #bcc0cc; border-radius: 4px; text-align: center; background-color: #ffffff; color: #4c4f69; }
@@ -694,20 +764,22 @@ QProgressBar::chunk { background-color: #1e66f5; border-radius: 3px; }
 """
 
 
-# ═══════════════════════════════════════════════════════════════════
-# SECTION 8: Main Window
-# ═══════════════════════════════════════════════════════════════════
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.corrector = TextCorrector()
+        try:
+            self.corrector = TextCorrector()
+        except RuntimeError as e:
+            logger.critical(f"Application cannot start due to DB init error: {e}")
+            QMessageBox.critical(None, "Fatal Error", f"Database initialization failed:\n{e}\n\nCheck logs: {LOG_FILE}")
+            sys.exit(1)
+
         self.current_errors = []
         self.worker = None
         self._dark_mode = True
         self._settings = QSettings("NlpCorrector", "AdvancedCorrector")
 
-        self.setWindowTitle("✍️ Advanced NLP Text Corrector (SQLite DB)")
+        self.setWindowTitle("✍️ Advanced NLP Text Corrector (Structured Isolated DBs)")
         self.setMinimumSize(1100, 750)
         self.resize(1300, 850)
 
@@ -716,6 +788,7 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._restore_settings()
         self._apply_theme()
+        logger.info("Application UI initialized successfully.")
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main Toolbar"); toolbar.setMovable(False); self.addToolBar(toolbar)
@@ -749,7 +822,6 @@ class MainWindow(QMainWindow):
 
     def _build_correction_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.setContentsMargins(8, 8, 8, 8)
-        
         stats_layout = QHBoxLayout(); self.stats_labels = {}
         for key in ["Characters", "Words", "Unknown"]:
             lbl = QLabel(f"{key}: 0"); lbl.setObjectName("statsLabel")
@@ -760,7 +832,6 @@ class MainWindow(QMainWindow):
         input_group = QGroupBox("Input Text"); input_layout = QVBoxLayout(input_group)
         self.input_edit = HighlightTextEdit(); self.input_edit.textChanged.connect(self._update_stats)
         input_layout.addWidget(self.input_edit); splitter.addWidget(input_group)
-
         output_group = QGroupBox("Corrected Text"); output_layout = QVBoxLayout(output_group)
         self.output_edit = HighlightTextEdit(readonly=True); output_layout.addWidget(self.output_edit)
         splitter.addWidget(output_group); splitter.setSizes([600, 600]); layout.addWidget(splitter, stretch=3)
@@ -829,12 +900,18 @@ class MainWindow(QMainWindow):
         self.spin_mcts_iter = QSpinBox(); self.spin_mcts_iter.setRange(50, 5000); self.spin_mcts_iter.setValue(500); self.spin_mcts_iter.setSingleStep(100); pl.addRow("MCTS iterations:", self.spin_mcts_iter)
         cl.addWidget(param_group)
 
-        db_group = QGroupBox("External Database (SQLite)"); dl = QVBoxLayout(db_group)
-        dl.addWidget(QLabel(f"Database File: {self.corrector.db.db_path}"))
-        btn_load_corpus = QPushButton("📂 Import Corpus to DB (Updates Dictionary & N-Grams)")
+        db_group = QGroupBox("Isolated Language Databases (SQLite)"); dl = QVBoxLayout(db_group)
+        dl.addWidget(QLabel("Each language uses its own DB file in a dedicated folder within the CWD."))
+        btn_load_corpus = QPushButton("📂 Import Corpus to Active Language DB (Updates Dict & N-Grams)")
         btn_load_corpus.setObjectName("primaryBtn"); btn_load_corpus.clicked.connect(self._import_corpus_to_db); dl.addWidget(btn_load_corpus)
         self.db_info_label = QLabel(""); dl.addWidget(self.db_info_label)
         cl.addWidget(db_group)
+
+        log_group = QGroupBox("Application Logs"); ll = QVBoxLayout(log_group)
+        ll.addWidget(QLabel(f"Log File: {os.path.abspath(LOG_FILE)}"))
+        btn_open_log = QPushButton("📂 Open Log File"); btn_open_log.clicked.connect(lambda: os.startfile(os.path.abspath(LOG_FILE)) if sys.platform == "win32" else os.system(f"open {os.path.abspath(LOG_FILE)}") if sys.platform == "darwin" else os.system(f"xdg-open {os.path.abspath(LOG_FILE)}"))
+        ll.addWidget(btn_open_log)
+        cl.addWidget(log_group)
 
         cl.addStretch(); scroll.setWidget(content); layout.addWidget(scroll); self.tabs.addTab(tab, "⚙️ Settings")
         self._update_db_info()
@@ -862,13 +939,14 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._settings.setValue("theme", "dark" if self._dark_mode else "light")
         self._settings.setValue("lang", self.lang_combo.currentIndex())
+        logger.info("Application closing. Saving settings.")
         event.accept()
 
     # ── Language & Stats ──────────────────────────────────────────
 
     def _on_lang_changed(self, index):
         self.corrector.set_language(["en", "es", "de"][index])
-        self.dict_lang_combo.setCurrentIndex(index); self._update_stats()
+        self.dict_lang_combo.setCurrentIndex(index); self._update_stats(); self._update_db_info()
 
     def _update_stats(self):
         s = self.corrector.get_stats(self.input_edit.toPlainText())
@@ -879,7 +957,9 @@ class MainWindow(QMainWindow):
     def _update_db_info(self):
         lang = self.corrector.current_lang
         p = self.corrector.profiles[lang]
-        self.db_info_label.setText(f"Lang: {lang.upper()} | Words: {len(p.words)} | User Words: {len(p.user_words)} | Bigrams: {sum(len(v) for v in p.bigram_counts.values())} | Trigrams: {len(p.trigram_counts)}")
+        db_path = os.path.abspath(p.db.db_path)
+        db_size = p.db.get_db_size_mb()
+        self.db_info_label.setText(f"Lang: {lang.upper()} | Path: {db_path} | Size: {db_size:.2f} MB\nWords: {len(p.words)} | User Words: {len(p.user_words)} | Bigrams: {sum(len(v) for v in p.bigram_counts.values())} | Trigrams: {len(p.trigram_counts)}")
 
     # ── Correction Logic ──────────────────────────────────────────
 
@@ -892,13 +972,18 @@ class MainWindow(QMainWindow):
         if mode == "beam": kwargs["beam_width"] = self.spin_beam_width.value()
         elif mode == "mcts": kwargs["iterations"] = self.spin_mcts_iter.value()
 
+        logger.info(f"Starting text check. Mode: {mode}, Lang: {self.corrector.current_lang}")
         self.btn_check.setEnabled(False); self.progress_bar.setVisible(True); self.progress_bar.setRange(0, 0)
         self.worker = CorrectionWorker(self.corrector, text, mode, **kwargs)
         self.worker.finished.connect(self._on_correction_done); self.worker.start()
 
     def _on_correction_done(self, result):
         self.btn_check.setEnabled(True); self.progress_bar.setVisible(False)
-        if "error" in result: self.statusBar().showMessage(f"Error: {result['error']}"); return
+        if "error" in result: 
+            logger.error(f"Correction failed: {result['error']}")
+            self.statusBar().showMessage(f"Error: {result['error']}")
+            QMessageBox.critical(self, "Processing Error", result["error"])
+            return
 
         if "errors" in result:
             self.current_errors = result["errors"]; self.current_decisions = {}
@@ -907,10 +992,12 @@ class MainWindow(QMainWindow):
             self.error_count_label.setText(f"{len(self.current_errors)} errors found")
             self.btn_apply.setEnabled(bool(self.current_errors))
             self.statusBar().showMessage(f"Found {len(self.current_errors)} error(s).")
+            logger.info(f"Interactive check found {len(self.current_errors)} errors.")
         else:
             self.output_edit.setPlainText(result["corrected"])
             self.error_table.setRowCount(0); self.error_count_label.setText(f"Auto-corrected (score: {result['score']:.4f})")
             self.btn_apply.setEnabled(False); self.statusBar().showMessage("Auto-correction complete.")
+            logger.info("Auto-correction complete.")
 
     def _apply_corrections(self):
         if not self.current_errors: return
@@ -919,6 +1006,7 @@ class MainWindow(QMainWindow):
             if err["start"] not in decisions: decisions[err["start"]] = err["suggestion"]
         self.output_edit.setPlainText(TextCorrector.apply_corrections(self.input_edit.toPlainText(), self.current_errors, decisions))
         self.input_edit.clear_highlights(); self.btn_apply.setEnabled(False)
+        logger.info("Corrections applied to text.")
 
     def _accept_all(self): self.error_table.accept_all()
     def _ignore_all(self): self.error_table.ignore_all()
@@ -932,7 +1020,10 @@ class MainWindow(QMainWindow):
         try:
             self._file_original_text = Path(path).read_text(encoding='utf-8')
             self.file_original_edit.setPlainText(self._file_original_text); self.file_corrected_edit.clear()
-        except Exception as e: QMessageBox.critical(self, "Error", str(e))
+            logger.info(f"Loaded file: {path}")
+        except IOError as e:
+            logger.error(f"Failed to load file: {e}")
+            QMessageBox.critical(self, "File Error", str(e))
 
     def _process_file(self):
         if not self._file_original_text: return
@@ -944,7 +1035,9 @@ class MainWindow(QMainWindow):
 
     def _on_file_done(self, result):
         self.btn_check.setEnabled(True); self.progress_bar.setVisible(False)
-        if "error" in result: self.statusBar().showMessage(result["error"]); return
+        if "error" in result: 
+            logger.error(f"File processing failed: {result['error']}")
+            self.statusBar().showMessage(result["error"]); return
         if "errors" in result:
             errors = result["errors"]; decisions = {e["start"]: e["suggestion"] for e in errors}
             self.file_corrected_edit.setPlainText(TextCorrector.apply_corrections(self._file_original_text, errors, decisions))
@@ -957,8 +1050,13 @@ class MainWindow(QMainWindow):
         if not text: return
         path, _ = QFileDialog.getSaveFileName(self, "Save", "corrected.txt", "Text Files (*.txt)")
         if path:
-            try: Path(path).write_text(text, encoding='utf-8'); self.statusBar().showMessage(f"Saved to {path}")
-            except Exception as e: QMessageBox.critical(self, "Error", str(e))
+            try: 
+                Path(path).write_text(text, encoding='utf-8')
+                self.statusBar().showMessage(f"Saved to {path}")
+                logger.info(f"Saved corrected file to {path}")
+            except IOError as e:
+                logger.error(f"Failed to save file: {e}")
+                QMessageBox.critical(self, "Save Error", str(e))
 
     # ── Dictionary Logic ──────────────────────────────────────────
 
@@ -1002,21 +1100,33 @@ class MainWindow(QMainWindow):
         if result.get("import_ok"):
             self._refresh_dictionary_list(); self._update_db_info()
             self.statusBar().showMessage(result["import_msg"])
-            QMessageBox.information(self, "Success", result["import_msg"] + "\n\nLanguage models and dictionary updated in SQLite DB.")
+            logger.info(result["import_msg"])
+            QMessageBox.information(self, "Success", result["import_msg"] + "\n\nIsolated DB updated.")
         else:
-            QMessageBox.critical(self, "Error", result.get("import_msg", "Unknown error"))
+            logger.error(result.get("import_msg", "Unknown error"))
+            QMessageBox.critical(self, "Import Error", result.get("import_msg", "Unknown error"))
+
 
 # ═══════════════════════════════════════════════════════════════════
 # SECTION 9: Entry Point
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
+    # Initialize logging system first
+    setup_logging()
+    logger.info("Starting Application...")
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QApplication(sys.argv)
-    app.setApplicationName("NLP Corrector")
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    
+    try:
+        app = QApplication(sys.argv)
+        app.setApplicationName("NLP Corrector")
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())
+    except Exception as e:
+        logger.critical(f"Unhandled exception at top level: {e}\n{traceback.format_exc()}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
