@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-Advanced NLP Text Corrector — Self-Contained Single File
-==========================================================
-A PySide6 desktop application for multi-language spelling and grammar checking.
-
-Features:
-  - 20 languages with isolated SQLite databases
-  - BK-tree + Levenshtein spell checking
-  - Grammar rules & confusion pairs (embedded, no external files needed)
-  - Interactive, Beam Search & MCTS correction modes
-  - User dictionary management
-  - Dark / Light themes
-  - Optional: download 50k word-frequency lists from GitHub (one-click in UI)
-
-Usage:
-  python app.py
+Advanced NLP Text Corrector 
+================================================================
+Changes vs. previous version
+  • Redesigned toolbar & editor chrome
+  • Live word / char / unknown-word stats beneath the editor
+  • Error-count badge on the Interactive tab
+  • Error-table rows colour-coded by decision state
+  • "Add to Dictionary" per-error button
+  • Double-click error row → jump & select in editor
+  • Right-click context menu with suggestions
+  • Diff-highlight view in Auto-Corrected tab
+  • Next / Previous error navigation
+  • Save / Export / Copy-corrected buttons
+  • Enter-key in word-input; search filter in user-dict list
+  • Confirmation before Clear; auto-recheck after Apply
+  • Tooltips & keyboard shortcuts (F7, Ctrl+Enter, etc.)
+  • Improved progress & status feedback
 """
 
-import sys, re, os, heapq, random, string, logging, traceback, urllib.request, urllib.error
+import sys, re, os, heapq, random, string, logging, traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Set
 from datetime import datetime
-from difflib import SequenceMatcher
 import sqlite3
 
 from PySide6.QtWidgets import (
@@ -31,16 +32,18 @@ from PySide6.QtWidgets import (
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QLineEdit, QMessageBox, QSplitter, QStatusBar,
     QProgressBar, QAbstractItemView, QInputDialog, QListWidget,
-    QMenu, QToolBar, QCheckBox, QSizePolicy, QFrame,
+    QMenu, QToolBar, QCheckBox, QSizePolicy, QFrame, QApplication,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer, QSize
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QSettings, QTimer, QSize,
+)
 from PySide6.QtGui import (
     QTextCharFormat, QColor, QFont, QTextCursor, QKeySequence, QAction,
     QIcon, QPalette,
 )
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 1: Logging
+# SECTION 1: Logging — Terminal Only
 # ═══════════════════════════════════════════════════════════════════
 
 def setup_logging():
@@ -55,30 +58,23 @@ def setup_logging():
 logger = logging.getLogger("NLP_Corrector")
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 2: Constants, Schema & Data
+# SECTION 2: Constants & Schema
 # ═══════════════════════════════════════════════════════════════════
 
 DB_FOLDER = "database"
 
 LANGUAGES = [
-    "en", "es", "de", "fr", "it", "hi", "ja", "zh", "ko", "vi",
-    "sw", "zu", "yo", "am", "ha", "nv", "qu", "chr", "oj", "iu",
+    "en","es","de","fr","it","hi","ja","zh","ko","vi",
+    "sw","zu","yo","am","ha","nv","qu","chr","oj","iu",
 ]
 LANG_NAMES = {
-    "en": "English", "es": "Spanish", "de": "German", "fr": "French",
-    "it": "Italian", "hi": "Hindi", "ja": "Japanese (Romaji)",
-    "zh": "Mandarin (Pinyin)", "ko": "Korean (Romanized)", "vi": "Vietnamese",
-    "sw": "Swahili", "zu": "Zulu", "yo": "Yoruba", "am": "Amharic (Romanized)",
-    "ha": "Hausa", "nv": "Navajo", "qu": "Quechua", "chr": "Cherokee (Romanized)",
-    "oj": "Ojibwe", "iu": "Inuktitut (Romanized)",
+    "en":"English","es":"Spanish","de":"German","fr":"French",
+    "it":"Italian","hi":"Hindi","ja":"Japanese (Romaji)",
+    "zh":"Mandarin (Pinyin)","ko":"Korean (Romanized)","vi":"Vietnamese",
+    "sw":"Swahili","zu":"Zulu","yo":"Yoruba","am":"Amharic (Romanized)",
+    "ha":"Hausa","nv":"Navajo","qu":"Quechua","chr":"Cherokee (Romanized)",
+    "oj":"Ojibwe","iu":"Inuktitut (Romanized)",
 }
-
-FREQ_BASE_URL = (
-    "https://raw.githubusercontent.com/hermitdave/FrequencyWords/"
-    "master/content/2018/{lang}/{lang}_50k.txt"
-)
-DOWNLOAD_LANGS = {"en", "es", "de", "fr", "it", "hi", "ja", "zh", "ko",
-                  "vi", "sw", "zu", "yo", "am", "ha"}
 
 SEED_MAP = {
     "en": "a able about above accept across act actually add afraid after afternoon again against age ago agree air all almost along already also always am among an and anger animal answer ant any anybody anymore anything anyplace anyway apart apartment appear apple are area arm army around arrive art as ask at attack attempt attend august aunt author autumn available away baby back bad bag ball ban band bank bar base basic basis bath be beach bean bear beat beautiful became because become bed been before began begin behind being believe bell belong below beside best better between beyond big bill bird birth bit bite black blame blank block blood blow blue board boat body bomb bond bone book border born both bother bottle bottom bound box boy brain branch brave bread break breath bridge brief bright bring broad broke brother brown brush build building burn bus business busy but buy by cabin cage cake call calm came camera camp can cap capital captain capture car card care careful carry case cash cast cat catch cause cell center central century certain chain chair chairman challenge champion chance change channel chapter character charge charm chart chase cheap check cheek cheese chest chicken chief child childhood chin chip choice choose church circle citizen city civil claim class clean clear click client climb clinical clock close cloth clothes cloud club clue cluster coach coal coast coat code coffee cold collar collect college colony color column combination come comfort command comment commit common communicate community company compare competition complete complex computer concern condition conduct confirm congress connect consider contact contain content contest continue control conversation cook cool cooperation copy core corner corporate correct cost could count counter country county couple courage course court cousin cover crack craft crash crazy cream create crime criminal crisis criteria critical crop cross crowd crucial cry cultural cup cure curious current curve custom customer cut cycle".split(),
@@ -86,21 +82,6 @@ SEED_MAP = {
     "de": "aber alle als am an auch auf aus bei bin bis bist da dann das dem den der des die dieser du durch ein eine einem einer es für gegen hat habe haben hier ich ihm ihn ihm in ist ja je kann keine können man mehr mich mir mit nach nicht nichts nun nur oder ohne so soll seine seinem seiner sich sie sind so etwas um und uns unter vom von vor war was wenn wer wie wir wird wo zu zum zur gehen geht ging zur schule kauft ein apfel ist auf tisch und gestern sie".split(),
     "fr": "a au aux avec ce ces ci dans de des du elle en et eux il je la le leur lui ma mais me même mes moi mon ne nos notre nous on ou par pas pour qu que qui sa se ses son sur ta te tes toi ton tu un une vos votre vous c ceci cela ces cet cette ici ils elles ont sont aime marche va vient achète pomme école maison table hier est allé avons font".split(),
     "it": "a ad ai al alla allo all hanno bene che chi ci come con cosa da dagl dagli dall dallo di dov dove e un una gli ha ho i il in la le lei li lo loro lui ma mi mio mia miei mie noi non o per più qui qua questo questa questi queste quelli quelle se sei si sono sta sto sul sulla sugli sugli tu tuo tua tuoi tue un uno va vi voi".split(),
-    "hi": ["मैं", "और", "तुम", "वह", "यह", "क्या", "कौन", "कब", "कहाँ", "क्यों", "कैसे", "एक", "दो", "तीन", "चार", "पाँच", "घर", "स्कूल", "पानी", "खाना", "बाजार", "आम", "सेब", "दिन", "रात", "सुबह", "शाम", "आज", "कल", "पुराना", "नया", "अच्छा", "बुरा", "बड़ा", "छोटा", "जाना", "आना", "खाना", "पीना", "सोना", "पढ़ना", "लिखना", "बोलना", "सुनना", "देखना", "समझना", "काम", "दोस्त", "प्यार", "दुनिया", "देश", "शहर", "गाँव", "रास्ता", "दरवाज़ा", "खिड़की", "किताब", "कुर्सी", "मेज़", "लड़का", "लड़की", "आदमी", "औरत"],
-    "ja": ["watashi", "anata", "kare", "kanojo", "kore", "sore", "are", "dare", "nani", "doko", "itsu", "naze", "dou", "ichi", "ni", "san", "shi", "go", "roku", "nana", "hachi", "kyu", "ju", "ie", "gakkou", "mizu", "tabemono", "kudamono", "asa", "hiru", "yoru", "ashita", "kinou", "kyou", "atarashii", "furui", "yoi", "warui", "ookii", "chiisai", "iku", "kuru", "taberu", "nomu", "neru", "miru", "kiku", "hanasu", "yomu", "kaku", "shigoto", "tomodachi", "ai", "sekai", "kuni", "machi", "michi", "doa", "mado", "hon", "isu", "tsukue", "otoko", "onna", "kodomo"],
-    "zh": ["wo", "ni", "ta", "women", "nimen", "tamen", "zhe", "na", "shenme", "shui", "nali", "shenme", "shihou", "weishenme", "zenme", "yi", "er", "san", "si", "wu", "liu", "qi", "ba", "jiu", "shi", "jia", "xuexiao", "shui", "shiwu", "shuiguo", "zaoshang", "zhongwu", "wanshang", "mingtian", "zuotian", "jintian", "xin", "jiu", "hao", "huai", "da", "xiao", "qu", "lai", "chi", "he", "shui", "kan", "ting", "shuo", "du", "xie", "gongzuo", "pengyou", "ai", "shijie", "guojia", "chengshi", "lu", "men", "chuang", "shu", "yizi", "zhuozi", "nanren", "nüren", "haizi"],
-    "ko": ["na", "neo", "geu", "uri", "neohui", "geudeul", "igeot", "geugeot", "mueot", "nugu", "eodi", "eonje", "wae", "eotteoke", "il", "i", "sam", "sa", "o", "yuk", "chil", "pal", "gu", "sip", "jip", "hakgyo", "mul", "eumsik", "gwail", "ajeossi", "nunkim", "achim", "jeongoh", "jeonyeok", "naeil", "eoje", "oneul", "saeroun", "oitheun", "joheun", "nappeun", "keun", "jageun", "gada", "oda", "meokda", "masida", "jada", "boda", "deudda", "malhada", "ilkda", "sseuda", "il", "chingu", "sarang", "segye", "gukga", "dosi", "gil", "mun", "chang", "chaek", "uija", "chaeksang", "namja", "yeoja", "ai"],
-    "vi": ["tôi", "bạn", "anh", "chị", "em", "chúng", "họ", "này", "kia", "gì", "ai", "đâu", "khi nào", "tại sao", "như thế nào", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín", "mười", "nhà", "trường", "nước", "thức ăn", "trái cây", "sáng", "trưa", "tối", "ngày mai", "hôm qua", "hôm nay", "mới", "cũ", "tốt", "xấu", "lớn", "nhỏ", "đi", "đến", "ăn", "uống", "ngủ", "nhìn", "nghe", "nói", "đọc", "viết", "công việc", "bạn bè", "tình yêu", "thế giới", "đất nước", "thành phố", "đường", "cửa", "cửa sổ", "sách", "ghế", "bàn", "đàn ông", "phụ nữ", "trẻ em"],
-    "sw": ["mimi", "wewe", "yeye", "sisi", "ninyi", "wao", "hili", "hilo", "nani", "nini", "wapi", "lini", "kwanini", "vipi", "moja", "mbili", "tatu", "nne", "tano", "sita", "saba", "nane", "tisa", "kumi", "nyumba", "shule", "maji", "chakula", "soko", "siku", "usiku", "asubuhi", "jioni", "leo", "jana", "kesho", "zuri", "mbaya", "kubwa", "ndogo", "kwenda", "kuja", "kula", "kunywa", "kulala", "kuona", "kusikia", "kusema", "kusoma", "kuandika", "kazi", "rafiki", "upendo", "dunia", "nchi", "jiji", "barabara", "mlango", "dirisha", "kitabu", "kiti", "meza", "mwanaume", "mwanamke", "mtoto"],
-    "zu": ["mina", "wena", "yena", "thina", "nina", "bona", "lesi", "lelo", "ubani", "ini", "kuphi", "nini", "kungani", "kanjani", "kunye", "kubili", "kuthathu", "kune", "kuhlamu", "isithupha", "isikhombisa", "isishiyagalombili", "isishiyagalolunye", "ishumi", "indlu", "isikole", "amanzi", "ukudla", "isikhathi", "kusasa", "namuhla", "izolo", "kusasa", "kakhulu", "kancane", "kuhle", "kabi", "ukuya", "ukufika", "ukudla", "ukuphuza", "ukulala", "ukubona", "ukuzwa", "ukukhuluma", "ukufunda", "ukubhala", "umsebenzi", "umngane", "uthando", "omhlaba", "izwe", "idolobha", "umgwaqo", "umsindo", "iwindi", "incwadi", "isihlalo", "itafula", "indoda", "umfazi", "ingane"],
-    "yo": ["emi", "iwo", "oun", "awa", "eyin", "awon", "eyi", "iyen", "kini", "tani", "nibo", "nigbawo", "kilode", "bawo", "okan", "eji", "eta", "erin", "arun", "efa", "eje", "ejo", "esan", "ewa", "ile", "ile-iwe", "omi", "ounje", "oja", "ojo", "oru", "aro", "ale", "loni", "ana", "ola", "titun", "ati", "daradara", "buruku", "nla", "kekere", "lo", "wa", "je", "mu", "sun", "ri", "gbo", "so", "ka", "ko", "ise", "ore", "ife", "aye", "orileede", "ilu", "ona", "ilekun", "ferese", "iwe", "aga", "tabili", "okunrin", "obinrin", "omode"],
-    "am": ["ine", "ante", "ersu", "inja", "inante", "inesu", "yih", "yih", "min", "man", "yet", "meles", "lemin", "inidet", "and", "hulett", "sost", "arat", "amist", "sidist", "sebat", "siment", "zet", "asir", "bet", "timhirtbet", "waha", "megot", "gabaya", "ken", "lilit", "tewat", "meseret", "konjo", "meri", "tilik", "tinish", "mehed", "meta", "bela", "teta", "tesh", "ayehu", "semahu", "meslu", "new", "kedu", "sera", "gibie", "gwadegna", "fikir", "alem", "hager", "ketema", "ketema", "menor", "tanta", "tifir", "metsek", "seb", "yerfu", "sigab", "wend", "set", "lij"],
-    "ha": ["ni", "ka", "shi", "mu", "ku", "su", "wannan", "wancan", "me", "wa", "ina", "yaushe", "domin", "yaya", "daya", "biyu", "uku", "hudu", "biyar", "shida", "bakwai", "takwas", "tara", "goma", "gida", "makaranta", "ruwa", "abinci", "kasuwa", "rana", "dare", "safe", "yamma", "yau", "jiya", "gobe", "sabon", "tsoho", "mai kyau", "mummunan", "babba", "karami", "tafiya", "zowa", "ci", "sha", "kwana", "gani", "ji", "fada", "karanta", "rubuta", "aiki", "aboki", "kauna", "duniya", "kasa", "birni", "hanya", "kofo", "taga", "littafi", "kujera", "tebur", "namiji", "mace", "yaro"],
-    "nv": ["shí", "ni", "haííníísh", "hastiin", "asdzání", "diné", "tʼáá", "łáʼ", "naaki", "táá", "dį́į́ʼ", "ashdlaʼ", "hastą́ą́", "tsostsʼid", "tseebíí", "náhástʼéí", "tłaʼtsʼid", "neeznáá", "kin", "oltaʼ", "tó", "chʼiyáán", "naaldlooshii", "jó", "tʼééʼ", "abiní", "anaaʼ", "díí", "níná", "yiską́", "łitso", "łizhin", "dootłʼizh", "łichííʼ", "łibáá", "bee", "bílaʼashdlaʼii", "óóltaʼ", "bikeeʼ", "bíńákees", "bikeeʼ", "awééʼ", "altso", "ałtsé", "ákótʼéego", "tʼááłáʼí", "ałą́ą́", "hodina", "yáʼátʼéeh", "doo", "yóó", "hózhó", "chahałheeł", "ndaʼalką́ą́ʼ", "hataał", "ałchíní"],
-    "qu": ["ñuqa", "qam", "pay", "ñuqanchik", "qamkuna", "paykuna", "kay", "chay", "ima", "pi", "maypi", "imaqtin", "imarayku", "imashina", "huk", "iskay", "kimsa", "tawa", "pichqa", "suqta", "qanchis", "pusaq", "isqun", "chunka", "wasi", "yachaywasi", "unu", "mikhuy", "hatun", "uchuy", "allin", "millay", "riy", "hamuy", "mikhuy", "upyay", "puñuy", "qhaway", "uyariy", "rimay", "ñawiy", "qillqay", "llankay", "masi", "khuyay", "pacha", "suyu", "llaqta", "ñan", "punku", "watana", "panqa", "tiyana", "mesa", "qhari", "warmi", "wawa"],
-    "chr": ["agiya", "nihi", "ahi", "ani", "ihini", "anvi", "gini", "hawiya", "nvhwi", "gado", "hela", "utana", "sawini", "ohili", "sagwi", "taline", "joie", "nvhi", "hisgi", "ahlisgi", "osda", "uyoI", "utana", "usdi", "awali", "uli", "asdi", "amayi", "asgaya", "agehya", "ayvwi", "ulahiyi", "tsunilv", "gunahi", "dawhilv", "anitsv", "ganohili", "ganohalidoi", "dikanohi", "wadv", "gowhti", "anigilo", "aniwodi", "unalii", "adohi", "ulvelodi", "digohweli", "detsanv", "ugata", "asuya", "gohudi", "ohvi", "itsula", "alonv", "uwenv"],
-    "oj": ["niin", "giin", "aapish", "wiin", "niindamin", "giinamin", "owinamin", "maaba", "naana", "moo", "anen", "wegonen", "aandi", "aaniish", "aaniin", "bezhik", "niizh", "nswi", "niiwin", "naanan", "ningodwaaswi", "niizhwaaswi", "nishwaaswi", "zhaangaso", "zhaang", "gikinoo'amaadi", "nibi", "babaama", "odaabaan", "anokii", "izhichige", "bimose", "nibaa", "waabama", "nendam", "gagwein", "gikendaan", "bizaan", "wenji", "maajaan", "bagwaji", "gitigaan", "dibishkaa", "gichi", "zhishi", "jaanii", "nookomis", "ookomisan", "mishoomis", "oogimaa", "anishinaabe", "ikwe", "inini", "abinoojiinh", "binesi", "makwa", "wajiw", "zaaga'igan"],
-    "iu": ["uva", "ivvit", "uanga", "uvagut", "illisi", "uqalimak", "una", "taku", "kina", "sumi", "nakurmiik", "qanoq", "ataaseq", "marluk", "pingasut", "sisamat", "tallimat", "arfinillit", "marlunnillit", "pingasunnillit", "sisamannillit", "quliaq", "tuquraq", "inuk", "inukshuk", "nuna", "sila", "imiq", "qimmiq", "nanuq", "tuktu", "nalunaaquttaq", "ullaaq", "unnuaq", "tingmiat", "niriit", "qaqqaq", "saattuq", "kalaallit", "angut", "arnaq", "irnuk", "panik", "iniriq", "majjuti", "isumagijjutiqarniq", "qaujimajatuqangit", "piliriqatigiinniq", "avattimut", "naatsi", "kangiqtugaapik", "igluit", "nattivak"],
 }
 
 SCHEMA_SQL = """
@@ -118,245 +99,8 @@ CREATE TABLE IF NOT EXISTS confusion_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT
 CREATE INDEX IF NOT EXISTS idx_confusion_wrong ON confusion_pairs(wrong);
 """
 
-# ── Grammar Rules (embedded from download_dictionaries.py) ──────────
-
-GRAMMAR_RULES = {
-    "en": [
-        {"rule_type": "regex", "pattern": r"\b(your)\s+(going|coming|doing|being|making|having|running|talking|walking|looking|trying|working|playing|saying|taking|getting|feeling|moving|living|giving|reading|writing|thinking|sitting|standing|sleeping|eating|drinking|watching|listening|waiting|leaving|putting|bringing|keeping|letting|setting|hitting|cutting|shutting|hurting|costing)\b",
-         "message": "Did you mean 'you're' (you are)?", "replacement": r"you're \2", "priority": 10},
-        {"rule_type": "regex", "pattern": r"\b(its)\s+(a|an|the|been|not|very|so|too|really|quite|just|also|still|already|always|never|often|probably|likely|certainly|definitely|clearly|obviously|apparently|supposed|going|been)\b",
-         "message": "Did you mean 'it's' (it is)?", "replacement": r"it's \2", "priority": 10},
-        {"rule_type": "regex", "pattern": r"\b(there)\s+(going|coming|doing|being|making|having|running|looking|trying|working|playing|taking|getting|sitting|standing|sleeping|eating|watching|waiting|leaving|coming|supposed)\b",
-         "message": "Did you mean 'they're' (they are)?", "replacement": r"they're \2", "priority": 8},
-        {"rule_type": "regex", "pattern": r"\b(a)\s+([aeiou]\w+)", "message": "Use 'an' before vowel sounds.", "replacement": r"an \2", "priority": 5},
-        {"rule_type": "regex", "pattern": r"\b(an)\s+([bcdfghjklmnpqrstvwxyz]\w+)", "message": "Use 'a' before consonant sounds.", "replacement": r"a \2", "priority": 5},
-        {"rule_type": "regex", "pattern": r"\b(\w+)\s+\1\b", "message": "Repeated word detected.", "replacement": r"\1", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(could|would|should|must)\s+of\b", "message": "Use 'have' instead of 'of' after modal verbs.", "replacement": r"\1 have", "priority": 10},
-        {"rule_type": "regex", "pattern": r"\b(alot)\b", "message": "'alot' is not a word. Did you mean 'a lot'?", "replacement": r"a lot", "priority": 9},
-        {"rule_type": "regex", "pattern": r"\b(i)\s+\w+", "message": "Capitalize 'I' as a pronoun.", "replacement": r"I", "priority": 2},
-        {"rule_type": "regex", "pattern": r"\b(cannot)\s+(help|but|stand|bear|afford)\b", "message": "Correct usage: 'cannot' + verb.", "replacement": r"cannot \2", "priority": 1},
-        {"rule_type": "regex", "pattern": r"\b(im)\s+(not|sure|going|sorry|happy|glad|afraid|tired|hungry|thirsty|busy|ready|interested|concerned|aware|excited|worried|curious|impressed|confident|certain)\b",
-         "message": "Did you mean 'I'm' (I am)?", "replacement": r"I'm \2", "priority": 10},
-        {"rule_type": "regex", "pattern": r"\b(didnt|doesnt|dont|cant|wont|wouldnt|couldnt|shouldnt|wasnt|werent|isnt|arent|hasnt|havent|hadnt)\b",
-         "message": "Missing apostrophe in contraction.", "replacement": r"\1", "priority": 8},
-        {"rule_type": "regex", "pattern": r"\b(he|she|it)\s+(don't)\b", "message": "Use 'doesn't' with 3rd person singular.", "replacement": r"\1 doesn't", "priority": 7},
-    ],
-    "es": [
-        {"rule_type": "regex", "pattern": r"\b(hay)\s+(un|una|el|la|los|las|mucho|mucha|muchos|muchas|poco|poca|pocos|pocas|más|menos)\b",
-         "message": "Verifique: 'hay' (verbo haber) vs 'ay' (interjección).", "replacement": r"hay \2", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(mas)\s+(que|de|el|la|los|las|un|una)\b",
-         "message": "¿Quiso decir 'más' (con acento)?", "replacement": r"más \2", "priority": 6},
-        {"rule_type": "regex", "pattern": r"\b(aun)\s+(cuando|que|si)\b",
-         "message": "¿Quiso decir 'aún' (todavía)?", "replacement": r"aún \2", "priority": 6},
-        {"rule_type": "regex", "pattern": r"\b(\w+)\s+\1\b", "message": "Palabra repetida.", "replacement": r"\1", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(tu)\s+(casa|familia|madre|padre|vida|trabajo|nombre|país)\b",
-         "message": "Verifique: 'tu' (posesivo) vs 'tú' (pronombre).", "replacement": r"tu \2", "priority": 2},
-        {"rule_type": "regex", "pattern": r"\b(el)\s+(es|era|está|estaba|será|sería|ha|había|puede|podía|tiene|tenía|quiere|quería|sabe|sabía|va|iba|viene|venía)\b",
-         "message": "¿Quiso decir 'él' (pronombre)?", "replacement": r"él \2", "priority": 4},
-    ],
-    "de": [
-        {"rule_type": "regex", "pattern": r"\b(das)\s+(wir|ich|du|er|sie|es|ihr|Sie)\s+(machen|wollen|können|müssen|sollen|dürfen|werden|haben|sein|lassen|bringen|geben|finden|wissen|denken|glauben|sehen|kommen|gehen|brauchen|versuchen)\b",
-         "message": "Meinten Sie 'dass' (Konjunktion)?", "replacement": r"dass \2 \3", "priority": 9},
-        {"rule_type": "regex", "pattern": r"\b(\w+)\s+\1\b", "message": "Wiederholtes Wort erkannt.", "replacement": r"\1", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(seid)\s+(ihr|Ihr)\b",
-         "message": "Verwechselung von 'seit' (Zeit) und 'seid' (Verb).", "replacement": r"seit ihr", "priority": 7},
-        {"rule_type": "regex", "pattern": r"\b(wider)\s+(erwartung|Willen|spiegeln|richten)\b",
-         "message": "Meinten Sie 'wider' oder 'wieder'?", "replacement": r"wider \2", "priority": 5},
-    ],
-    "fr": [
-        {"rule_type": "regex", "pattern": r"\b(a)\s+(fait|été|vu|pris|mis|donné|dit|voulu|pu|dû|su|cru|dû|eu|venu|allé|resté|devenu|paru|semblé|né|mort)\b",
-         "message": "Vérifiez: 'a' (verbe avoir) vs 'à' (préposition).", "replacement": r"a \2", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(ou)\s+(est|sont|était|sera|serait|a|ont|avait|aura|aurait|peut|doit|va|vient|faut|semble|paraît|reste)\b",
-         "message": "Vouliez-vous dire 'où' (lieu/question)?", "replacement": r"où \2", "priority": 7},
-        {"rule_type": "regex", "pattern": r"\b(\w+)\s+\1\b", "message": "Mot répété détecté.", "replacement": r"\1", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(la)\s+(ou|et|mais|donc|car|ni|que|qui|quand|si|comme|puisque)\b",
-         "message": "Vouliez-vous dire 'là' (lieu)?", "replacement": r"là \2", "priority": 6},
-    ],
-    "it": [
-        {"rule_type": "regex", "pattern": r"\b(e)\s+(stato|stata|stati|state|andato|andata|andati|andate|venuto|venuta|venuti|venute|detto|fatto|visto|potuto|voluto|dovuto|saputo|avuto|dato|messo|preso|scritto|letto|conosciuto)\b",
-         "message": "Verificare: 'è' (verbo essere) vs 'e' (congiunzione).", "replacement": r"è \2", "priority": 8},
-        {"rule_type": "regex", "pattern": r"\b(li)\s+(ho|hai|ha|abbiamo|avete|hanno|vedo|vedi|vede|vediamo|vedete|vedono|conosco|conosci|conosce|conosciamo|conoscete|conoscono)\b",
-         "message": "Verificare: 'li' (pronome) vs 'lì' (avverbio di luogo).", "replacement": r"li \2", "priority": 5},
-        {"rule_type": "regex", "pattern": r"\b(\w+)\s+\1\b", "message": "Parola ripetuta rilevata.", "replacement": r"\1", "priority": 3},
-        {"rule_type": "regex", "pattern": r"\b(ne)\s+(ho|hai|ha|abbiamo|avete|hanno|sono|sei|è|siamo|siete)\b",
-         "message": "Verificare: 'né' (congiunzione negativa) vs 'ne' (pronome/partitivo).", "replacement": r"ne \2", "priority": 5},
-    ],
-}
-# Add repeated-word rule for languages that don't have specific rules
-for _lang in LANGUAGES:
-    if _lang not in GRAMMAR_RULES:
-        GRAMMAR_RULES[_lang] = [
-            {"rule_type": "regex", "pattern": r"\b(\w+)\s+\1\b", "message": "Repeated word detected.", "replacement": r"\1", "priority": 3},
-        ]
-
-# ── Confusion Pairs (embedded from download_dictionaries.py) ────────
-
-CONFUSION_PAIRS = {
-    "en": [
-        ("their", "there", "location", "Did you mean 'there' (location)?"),
-        ("their", "they're", "contraction", "Did you mean 'they're' (they are)?"),
-        ("there", "their", "possession", "Did you mean 'their' (possessive)?"),
-        ("there", "they're", "contraction", "Did you mean 'they're' (they are)?"),
-        ("your", "you're", "contraction", "Did you mean 'you're' (you are)?"),
-        ("youre", "you're", "contraction", "Did you mean 'you're' (you are)?"),
-        ("its", "it's", "contraction", "Did you mean 'it's' (it is)?"),
-        ("its'", "it's", "contraction", "Did you mean 'it's' (it is)?"),
-        ("affect", "effect", "verb/noun", "Did you mean 'effect' (noun)? If verb, 'affect' is correct."),
-        ("effect", "affect", "noun/verb", "Did you mean 'affect' (verb)? If noun, 'effect' is correct."),
-        ("then", "than", "comparison", "Did you mean 'than' (comparison)?"),
-        ("than", "then", "time/sequence", "Did you mean 'then' (time/sequence)?"),
-        ("lose", "loose", "not-tight", "Did you mean 'loose' (not tight)? If 'lose' (fail to win), this is correct."),
-        ("loose", "lose", "misplace/fail", "Did you mean 'lose' (misplace/fail)?"),
-        ("accept", "except", "exclusion", "Did you mean 'except' (exclusion)?"),
-        ("except", "accept", "receive", "Did you mean 'accept' (receive)?"),
-        ("weather", "whether", "if/whether", "Did you mean 'whether' (if)?"),
-        ("whether", "weather", "climate", "Did you mean 'weather' (climate)?"),
-        ("piece", "peace", "no-war", "Did you mean 'peace' (no war)?"),
-        ("peace", "piece", "part", "Did you mean 'piece' (part)?"),
-        ("principal", "principle", "rule/belief", "Did you mean 'principle' (rule/belief)?"),
-        ("principle", "principal", "head/main", "Did you mean 'principal' (head/main)?"),
-        ("stationary", "stationery", "writing-supplies", "Did you mean 'stationery' (writing supplies)?"),
-        ("stationery", "stationary", "not-moving", "Did you mean 'stationary' (not moving)?"),
-        ("complement", "compliment", "praise", "Did you mean 'compliment' (praise)?"),
-        ("compliment", "complement", "complete", "Did you mean 'complement' (complete)?"),
-        ("desert", "dessert", "sweet-food", "Did you mean 'dessert' (sweet food)?"),
-        ("dessert", "desert", "dry-land/abandon", "Did you mean 'desert' (dry land/abandon)?"),
-        ("advise", "advice", "noun", "Did you mean 'advice' (noun)? 'Advise' is a verb."),
-        ("advice", "advise", "verb", "Did you mean 'advise' (verb)? 'Advice' is a noun."),
-        ("breath", "breathe", "verb", "Did you mean 'breathe' (verb)? 'Breath' is a noun."),
-        ("breathe", "breath", "noun", "Did you mean 'breath' (noun)? 'Breathe' is a verb."),
-        ("choose", "chose", "past-tense", "Did you mean 'chose' (past tense)? 'Choose' is present."),
-        ("chose", "choose", "present", "Did you mean 'choose' (present)? 'Chose' is past."),
-        ("quite", "quiet", "silent", "Did you mean 'quiet' (silent)?"),
-        ("quiet", "quite", "very/fairly", "Did you mean 'quite' (very/fairly)?"),
-        ("through", "threw", "past-throw", "Did you mean 'threw' (past of throw)?"),
-        ("threw", "through", "via", "Did you mean 'through' (via)?"),
-        ("weak", "week", "7-days", "Did you mean 'week' (7 days)?"),
-        ("week", "weak", "not-strong", "Did you mean 'weak' (not strong)?"),
-        ("aloud", "allowed", "permitted", "Did you mean 'allowed' (permitted)?"),
-        ("allowed", "aloud", "out-loud", "Did you mean 'aloud' (out loud)?"),
-        ("bare", "bear", "animal/carry", "Did you mean 'bear' (animal/carry)?"),
-        ("bear", "bare", "naked", "Did you mean 'bare' (naked)?"),
-        ("brake", "break", "smash", "Did you mean 'break' (smash)?"),
-        ("break", "brake", "stop", "Did you mean 'brake' (stop)?"),
-        ("coarse", "course", "class/path", "Did you mean 'course' (class/path)?"),
-        ("course", "coarse", "rough", "Did you mean 'coarse' (rough)?"),
-        ("hear", "here", "location", "Did you mean 'here' (location)?"),
-        ("here", "hear", "listen", "Did you mean 'hear' (listen)?"),
-        ("hole", "whole", "entire", "Did you mean 'whole' (entire)?"),
-        ("whole", "hole", "opening", "Did you mean 'hole' (opening)?"),
-        ("know", "no", "negative", "Did you mean 'no' (negative)?"),
-        ("no", "know", "understand", "Did you mean 'know' (understand)?"),
-        ("meet", "meat", "food", "Did you mean 'meat' (food)?"),
-        ("meat", "meet", "encounter", "Did you mean 'meet' (encounter)?"),
-        ("plain", "plane", "aircraft", "Did you mean 'plane' (aircraft)?"),
-        ("plane", "plain", "simple", "Did you mean 'plain' (simple)?"),
-        ("right", "write", "verb", "Did you mean 'write' (verb)?"),
-        ("write", "right", "correct/direction", "Did you mean 'right' (correct/direction)?"),
-        ("sail", "sale", "selling", "Did you mean 'sale' (selling)?"),
-        ("sale", "sail", "boat", "Did you mean 'sail' (boat)?"),
-        ("scene", "seen", "viewed", "Did you mean 'seen' (viewed)?"),
-        ("seen", "scene", "view", "Did you mean 'scene' (view)?"),
-        ("site", "sight", "vision", "Did you mean 'sight' (vision)?"),
-        ("sight", "site", "location", "Did you mean 'site' (location)?"),
-        ("wait", "weight", "heaviness", "Did you mean 'weight' (heaviness)?"),
-        ("weight", "wait", "delay", "Did you mean 'wait' (delay)?"),
-        ("ware", "wear", "clothing", "Did you mean 'wear' (clothing)?"),
-        ("wear", "ware", "goods", "Did you mean 'ware' (goods)?"),
-        ("were", "where", "location", "Did you mean 'where' (location)?"),
-        ("where", "were", "past-be", "Did you mean 'were' (past of be)?"),
-    ],
-    "es": [
-        ("hay", "ay", "interjección", "¿Quiso decir 'ay' (interjección)?"),
-        ("ay", "hay", "verbo-haber", "¿Quiso decir 'hay' (verbo haber)?"),
-        ("mas", "más", "cantidad", "¿Quiso decir 'más' (con acento, cantidad)?"),
-        ("más", "mas", "pero", "¿Quiso decir 'mas' (pero)?"),
-        ("aun", "aún", "todavía", "¿Quiso decir 'aún' (todavía)?"),
-        ("aún", "aun", "incluso", "¿Quiso decir 'aun' (incluso)?"),
-        ("como", "cómo", "interrogativo", "¿Quiso decir 'cómo' (interrogativo)?"),
-        ("cómo", "como", "comparativo", "¿Quiso decir 'como' (comparativo)?"),
-        ("que", "qué", "interrogativo", "¿Quiso decir 'qué' (interrogativo)?"),
-        ("qué", "que", "relativo", "¿Quiso decir 'que' (relativo)?"),
-        ("mi", "mí", "pronombre", "¿Quiso decir 'mí' (pronombre)?"),
-        ("mí", "mi", "posesivo", "¿Quiso decir 'mi' (posesivo)?"),
-        ("tu", "tú", "pronombre", "¿Quiso decir 'tú' (pronombre)?"),
-        ("tú", "tu", "posesivo", "¿Quiso decir 'tu' (posesivo)?"),
-        ("el", "él", "pronombre", "¿Quiso decir 'él' (pronombre)?"),
-        ("él", "el", "artículo", "¿Quiso decir 'el' (artículo)?"),
-        ("se", "sé", "verbo-saber", "¿Quiso decir 'sé' (verbo saber)?"),
-        ("sé", "se", "pronombre", "¿Quiso decir 'se' (pronombre)?"),
-        ("te", "té", "bebida", "¿Quiso decir 'té' (bebida)?"),
-        ("té", "te", "pronombre", "¿Quiso decir 'te' (pronombre)?"),
-        ("si", "sí", "afirmación", "¿Quiso decir 'sí' (afirmación)?"),
-        ("sí", "si", "condicional", "¿Quiso decir 'si' (condicional)?"),
-        ("solo", "sólo", "solamente", "¿Quiso decir 'sólo' (solamente)?"),
-        ("sólo", "solo", "adjetivo", "¿Quiso decir 'solo' (adjetivo)?"),
-        ("ha", "a", "preposición", "¿Quiso decir 'a' (preposición) en vez de 'ha' (verbo)?"),
-        ("a", "ha", "verbo", "¿Quiso decir 'ha' (verbo haber)?"),
-        ("echo", "hecho", "participio", "¿Quiso decir 'hecho' (participio de hacer)?"),
-        ("hecho", "echo", "verbo-echar", "¿Quiso decir 'echo' (verbo echar)?"),
-        ("valla", "vaya", "interjección", "¿Quiso decir 'vaya' (interjección)?"),
-        ("vaya", "valla", "cerca", "¿Quiso decir 'valla' (cerca)?"),
-        ("baya", "vaya", "interjección", "¿Quiso decir 'vaya' (interjección)?"),
-        ("haya", "aya", "niñera", "¿Quiso decir 'aya' (niñera)?"),
-        ("aya", "haya", "verbo-haber", "¿Quiso decir 'haya' (verbo haber)?"),
-        ("halla", "haya", "verbo-haber", "¿Quiso decir 'haya' (verbo haber)?"),
-        ("haya", "halla", "verbo-hallar", "¿Quiso decir 'halla' (verbo hallar)?"),
-    ],
-    "de": [
-        ("das", "dass", "Konjunktion", "Meinten Sie 'dass' (Konjunktion)?"),
-        ("dass", "das", "Artikel", "Meinten Sie 'das' (Artikel)?"),
-        ("seit", "seid", "Verb-sein", "Meinten Sie 'seid' (Verb sein, 2. Person Plural)?"),
-        ("seid", "seit", "Zeitangabe", "Meinten Sie 'seit' (Zeitangabe)?"),
-        ("wider", "wieder", "nochmals", "Meinten Sie 'wieder' (nochmals)?"),
-        ("wieder", "wider", "gegen", "Meinten Sie 'wider' (gegen)?"),
-        ("muß", "muss", "neue-Rechtschreibung", "Verwenden Sie 'muss' (neue Rechtschreibung)."),
-    ],
-    "fr": [
-        ("a", "à", "préposition", "Vouliez-vous dire 'à' (préposition)?"),
-        ("à", "a", "verbe-avoir", "Vouliez-vous dire 'a' (verbe avoir, présent)?"),
-        ("ou", "où", "lieu", "Vouliez-vous dire 'où' (lieu/question)?"),
-        ("où", "ou", "conjonction", "Vouliez-vous dire 'ou' (conjonction)?"),
-        ("ce", "se", "réfléchi", "Vouliez-vous dire 'se' (pronom réfléchi)?"),
-        ("se", "ce", "démonstratif", "Vouliez-vous dire 'ce' (déterminant)?"),
-        ("la", "là", "lieu", "Vouliez-vous dire 'là' (lieu)?"),
-        ("là", "la", "article", "Vouliez-vous dire 'la' (article)?"),
-        ("du", "dû", "participe", "Vouliez-vous dire 'dû' (participe passé de devoir)?"),
-        ("dû", "du", "article", "Vouliez-vous dire 'du' (article)?"),
-        ("sur", "sûr", "certain", "Vouliez-vous dire 'sûr' (certain)?"),
-        ("sûr", "sur", "préposition", "Vouliez-vous dire 'sur' (préposition)?"),
-        ("et", "est", "verbe", "Vouliez-vous dire 'est' (verbe être)?"),
-        ("est", "et", "conjonction", "Vouliez-vous dire 'et' (conjonction)?"),
-        ("son", "sont", "verbe", "Vouliez-vous dire 'sont' (verbe être)?"),
-        ("sont", "son", "possessif", "Vouliez-vous dire 'son' (possessif)?"),
-        ("peu", "peut", "verbe", "Vouliez-vous dire 'peut' (verbe pouvoir)?"),
-        ("peut", "peu", "quantité", "Vouliez-vous dire 'peu' (quantité)?"),
-        ("tout", "tous", "pluriel", "Vouliez-vous dire 'tous' (pluriel)?"),
-        ("tous", "tout", "singulier", "Vouliez-vous dire 'tout' (singulier)?"),
-    ],
-    "it": [
-        ("e", "è", "verbo-essere", "Volevate dire 'è' (verbo essere)?"),
-        ("è", "e", "congiunzione", "Volevate dire 'e' (congiunzione)?"),
-        ("li", "lì", "avverbio-luogo", "Volevate dire 'lì' (avverbio di luogo)?"),
-        ("lì", "li", "pronome", "Volevate dire 'li' (pronome)?"),
-        ("la", "là", "avverbio-luogo", "Volevate dire 'là' (avverbio di luogo)?"),
-        ("là", "la", "articolo", "Volevate dire 'la' (articolo)?"),
-        ("se", "sé", "pronome-riflessivo", "Volevate dire 'sé' (pronome riflessivo)?"),
-        ("sé", "se", "congiunzione", "Volevate dire 'se' (congiunzione)?"),
-        ("ne", "né", "negazione", "Volevate dire 'né' (congiunzione negativa)?"),
-        ("né", "ne", "pronome", "Volevate dire 'ne' (pronome/partitivo)?"),
-        ("da", "dà", "verbo-dare", "Volevate dire 'dà' (verbo dare)?"),
-        ("dà", "da", "preposizione", "Volevate dire 'da' (preposizione)?"),
-        ("si", "sì", "affermazione", "Volevate dire 'sì' (affermazione)?"),
-        ("sì", "si", "pronome", "Volevate dire 'si' (pronome)?"),
-        ("te", "té", "bevanda", "Volevate dire 'té' (bevanda)?"),
-        ("té", "te", "pronome", "Volevate dire 'te' (pronome)?"),
-    ],
-}
-
-
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 3: NLP Engine
+# SECTION 3: NLP Engine  (unchanged)
 # ═══════════════════════════════════════════════════════════════════
 
 def levenshtein(a: str, b: str) -> int:
@@ -404,7 +148,7 @@ class BKTree:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 4: Database Manager (self-contained)
+# SECTION 4: Database Manager  (unchanged)
 # ═══════════════════════════════════════════════════════════════════
 
 class DatabaseManager:
@@ -426,7 +170,6 @@ class DatabaseManager:
         cur.execute("SELECT COUNT(*) FROM dictionary")
         if cur.fetchone()[0] == 0:
             self._seed()
-        self._ensure_grammar_data()
 
     def _seed(self):
         words = SEED_MAP.get(self.lang_code, [])
@@ -451,38 +194,6 @@ class DatabaseManager:
                 "ON CONFLICT(w1,w2,w3) DO UPDATE SET freq=freq+?",
                 [(a,b,c,f,f) for (a,b,c),f in tf.items()],
             )
-
-    def _ensure_grammar_data(self):
-        """Insert embedded grammar rules and confusion pairs on first run."""
-        # Only insert if no rules exist yet
-        cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM grammar_rules")
-        if cur.fetchone()[0] == 0:
-            rules = GRAMMAR_RULES.get(self.lang_code, [])
-            if rules:
-                with self.conn:
-                    self.conn.executemany(
-                        "INSERT INTO grammar_rules (rule_type,pattern,message,replacement,priority,enabled) VALUES (?,?,?, ?,?,1)",
-                        [(r["rule_type"], r["pattern"], r["message"], r["replacement"], r.get("priority", 0))
-                         for r in rules],
-                    )
-                logger.info(f"  Inserted {len(rules)} grammar rules for {self.lang_code}")
-
-        cur.execute("SELECT COUNT(*) FROM confusion_pairs")
-        if cur.fetchone()[0] == 0:
-            pairs = CONFUSION_PAIRS.get(self.lang_code, [])
-            if pairs:
-                with self.conn:
-                    self.conn.executemany(
-                        "INSERT INTO confusion_pairs (wrong,correct,context_hint,message) VALUES (?,?,?,?)",
-                        [(p[0], p[1], p[2], p[3]) for p in pairs],
-                    )
-                logger.info(f"  Inserted {len(pairs)} confusion pairs for {self.lang_code}")
-
-        now = datetime.utcnow().isoformat()
-        with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2.0')")
-            self.conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_init', ?)", (now,))
 
     def load_words(self) -> Dict[str,int]:
         try: return {r[0]:r[1] for r in self.conn.execute("SELECT word,freq FROM dictionary").fetchall()}
@@ -554,71 +265,6 @@ class DatabaseManager:
                 [(a,b,c,f,f) for (a,b,c),f in tf.items()],
             )
 
-    def download_dictionary(self):
-        """Download 50k word list from FrequencyWords GitHub repo."""
-        if self.lang_code not in DOWNLOAD_LANGS:
-            return False, f"No remote dictionary available for '{self.lang_code}'."
-        cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM dictionary")
-        existing = cur.fetchone()[0]
-        if existing >= 10000:
-            return True, f"Already {existing:,} words. Skipping download."
-
-        url = FREQ_BASE_URL.format(lang=self.lang_code)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "NLP-Corrector/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8")
-        except urllib.error.HTTPError as e:
-            return False, f"HTTP {e.code} for '{self.lang_code}'."
-        except urllib.error.URLError as e:
-            return False, f"Network error: {e.reason}"
-        except Exception as e:
-            return False, f"Download failed: {e}"
-
-        lines = raw.strip().split("\n")
-        now = datetime.utcnow().isoformat()
-        word_data = []
-        all_words = []
-        for line in lines:
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                word, freq_str = parts[0], parts[1]
-                try: freq = int(freq_str)
-                except ValueError: continue
-                word_data.append((word, freq, now))
-                repeat = min(max(1, int(freq ** 0.15)), 50)
-                all_words.extend([word] * repeat)
-            elif len(parts) == 1 and parts[0]:
-                word_data.append((parts[0], 1, now))
-                all_words.append(parts[0])
-
-        if not word_data:
-            return False, "No valid words parsed."
-
-        with self.conn:
-            self.conn.executemany(
-                """INSERT INTO dictionary (word, freq, is_user, created_at, updated_at)
-                   VALUES (?, ?, 0, ?, ?)
-                   ON CONFLICT(word) DO UPDATE SET freq = freq + excluded.freq, updated_at = excluded.updated_at""",
-                [(w, f, now, now) for w, f, now in word_data],
-            )
-            bigram_freq = Counter(zip(all_words, all_words[1:]))
-            self.conn.executemany(
-                "INSERT INTO bigrams (w1,w2,freq) VALUES (?,?,?) ON CONFLICT(w1,w2) DO UPDATE SET freq=freq+?",
-                [(w1, w2, f, f) for (w1, w2), f in bigram_freq.items()],
-            )
-            trigram_freq = Counter(zip(all_words, all_words[1:], all_words[2:]))
-            self.conn.executemany(
-                "INSERT INTO trigrams (w1,w2,w3,freq) VALUES (?,?,?,?) ON CONFLICT(w1,w2,w3) DO UPDATE SET freq=freq+?",
-                [(w1, w2, w3, f, f) for (w1, w2, w3), f in trigram_freq.items()],
-            )
-
-        cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM dictionary")
-        total = cur.fetchone()[0]
-        return True, f"Downloaded {len(word_data):,} words. DB now has {total:,} words."
-
     def get_db_size_mb(self) -> float:
         try: return os.path.getsize(self.db_path)/(1024*1024)
         except: return 0.0
@@ -632,7 +278,7 @@ class DatabaseManager:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 5: Language Profile & Text Corrector
+# SECTION 5: Language Profile & Text Corrector  (unchanged)
 # ═══════════════════════════════════════════════════════════════════
 
 class LanguageProfile:
@@ -669,14 +315,14 @@ class TextCorrector:
     def add_word(self, word, lang=None):
         lang = lang or self.current_lang; word = word.lower().strip()
         if not word: return "Empty word."
-        try: self.profiles[lang].db.add_word(word); self.profiles[lang].refresh_from_db(); return f"'{word}' added to {lang.upper()}."
+        try: self.profiles[lang].db.add_word(word); self.profiles[lang].refresh_from_db(); return f"✓ '{word}' added to {lang.upper()}."
         except Exception as e: return f"Error: {e}"
 
     def remove_word(self, word, lang=None):
         lang = lang or self.current_lang; word = word.lower().strip()
         try:
             if word in self.profiles[lang].user_words:
-                self.profiles[lang].db.remove_user_word(word); self.profiles[lang].refresh_from_db(); return f"'{word}' removed."
+                self.profiles[lang].db.remove_user_word(word); self.profiles[lang].refresh_from_db(); return f"✓ '{word}' removed."
             return f"'{word}' not in user dict."
         except Exception as e: return f"Error: {e}"
 
@@ -686,15 +332,6 @@ class TextCorrector:
             text = Path(path).read_text(encoding='utf-8')
             self.profiles[lang].db.import_corpus(text); self.profiles[lang].refresh_from_db()
             return True, f"Imported to {lang.upper()}."
-        except Exception as e: return False, str(e)
-
-    def download_dictionary(self, lang=None):
-        lang = lang or self.current_lang
-        try:
-            ok, msg = self.profiles[lang].db.download_dictionary()
-            if ok:
-                self.profiles[lang].refresh_from_db()
-            return ok, msg
         except Exception as e: return False, str(e)
 
     @staticmethod
@@ -825,12 +462,12 @@ class TextCorrector:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 6: Worker Threads
+# SECTION 6: Worker Thread
 # ═══════════════════════════════════════════════════════════════════
 
 class CorrectionWorker(QThread):
     finished = Signal(object)
-    progress = Signal(str)
+    progress = Signal(str)           # ← new: status messages during work
 
     def __init__(self, corrector, text, mode, **kw):
         super().__init__()
@@ -839,38 +476,21 @@ class CorrectionWorker(QThread):
     def run(self):
         try:
             if self.mode == "interactive":
-                self.progress.emit("Analyzing text ...")
+                self.progress.emit("Analyzing text …")
                 result = self.corrector.correct_text_interactive(self.text)
                 self.finished.emit({"errors": result})
             elif self.mode == "beam":
-                self.progress.emit("Running beam search ...")
+                self.progress.emit("Running beam search …")
                 c, s = self.corrector.correct_beam_search(self.text, self.kw.get("beam_width", 5))
                 self.finished.emit({"corrected": c, "score": s})
             elif self.mode == "mcts":
-                self.progress.emit("Running MCTS optimisation ...")
+                self.progress.emit("Running MCTS optimisation …")
                 c, s = self.corrector.correct_mcts(self.text, self.kw.get("iterations", 500))
                 self.finished.emit({"corrected": c, "score": s})
             elif self.mode == "import":
-                self.progress.emit("Importing corpus ...")
+                self.progress.emit(f"Importing corpus …")
                 ok, msg = self.corrector.import_corpus(self.kw["path"])
                 self.finished.emit({"import_ok": ok, "import_msg": msg})
-        except Exception as e:
-            self.finished.emit({"error": str(e)})
-
-
-class DownloadWorker(QThread):
-    finished = Signal(object)
-    progress = Signal(str)
-
-    def __init__(self, corrector, lang):
-        super().__init__()
-        self.corrector = corrector; self.lang = lang
-
-    def run(self):
-        try:
-            self.progress.emit(f"Downloading dictionary for {self.lang.upper()} ...")
-            ok, msg = self.corrector.download_dictionary(self.lang)
-            self.finished.emit({"download_ok": ok, "download_msg": msg})
         except Exception as e:
             self.finished.emit({"error": str(e)})
 
@@ -882,7 +502,7 @@ class DownloadWorker(QThread):
 class HighlightTextEdit(QTextEdit):
     """Editor with error highlighting + right-click context menu."""
 
-    suggestion_requested = Signal(int, int, str)
+    suggestion_requested = Signal(int, int, str)   # start, end, replacement
 
     def __init__(self, parent=None, readonly=False):
         super().__init__(parent)
@@ -890,6 +510,8 @@ class HighlightTextEdit(QTextEdit):
         self.setAcceptRichText(False)
         f = QFont("Consolas", 11); f.setStyleHint(QFont.Monospace); self.setFont(f)
         self._errors: list = []
+
+    # ── highlighting ──
 
     def clear_highlights(self):
         self.setExtraSelections([])
@@ -909,21 +531,27 @@ class HighlightTextEdit(QTextEdit):
             extra.append(sel)
         self.setExtraSelections(extra)
 
+    # ── context menu ──
+
     def contextMenuEvent(self, event):
         menu = self.createStandardContextMenu()
         cursor = self.cursorForPosition(event.pos())
         pos = cursor.position()
+
+        # Find error at this position
         for e in self._errors:
             if e["start"] <= pos <= e["end"]:
                 menu.addSeparator()
-                sug_label = menu.addAction(f"Suggestions for '{e['original']}':")
+                sug_label = menu.addAction(f"💡 Suggestions for '{e['original']}':")
                 sug_label.setEnabled(False)
                 for cand in e.get("all_candidates", [e["suggestion"]])[:5]:
-                    action = menu.addAction(f"  -> {cand}")
+                    action = menu.addAction(f"  → {cand}")
+                    action.setData((e["start"], e["end"], cand))
                     action.triggered.connect(
                         self._make_suggestion_handler(e["start"], e["end"], cand)
                     )
                 break
+
         menu.exec(event.globalPos())
 
     def _make_suggestion_handler(self, start, end, replacement):
@@ -932,6 +560,7 @@ class HighlightTextEdit(QTextEdit):
         return handler
 
     def select_range(self, start, end):
+        """Select a range and scroll to make it visible."""
         cur = self.textCursor()
         cur.setPosition(start)
         cur.setPosition(end, QTextCursor.KeepAnchor)
@@ -942,9 +571,10 @@ class HighlightTextEdit(QTextEdit):
 class ErrorTableWidget(QTableWidget):
     """Error list with per-row decision state colours & Add-to-dict button."""
 
-    decision_changed = Signal(int, str)
-    add_to_dict = Signal(str)
+    decision_changed = Signal(int, str)   # (start_pos, decision_text)
+    add_to_dict = Signal(str)             # word to add
 
+    # Colour roles for decision states
     _STATE_COLORS = {
         "accepted":  QColor(40, 160, 60, 35),
         "ignored":   QColor(160, 40, 40, 25),
@@ -961,17 +591,17 @@ class ErrorTableWidget(QTableWidget):
         self.setAlternatingRowColors(True)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._errors = []
-        self._decisions: Dict[int, str] = {}
+        self._decisions: Dict[int, str] = {}   # start → decision_text | "ignore"
 
     def set_errors(self, errors):
         self._errors = errors
         self._decisions = {}
         self.setRowCount(len(errors))
-        icons = {"spelling": "SPELL", "grammar": "GRAM", "confusion": "CONF"}
+        icons = {"spelling": "✏️", "grammar": "📖", "confusion": "🔄"}
 
         for i, e in enumerate(errors):
             self.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            type_item = QTableWidgetItem(f"{icons.get(e['type'], '?')} {e['type'].capitalize()}")
+            type_item = QTableWidgetItem(f"{icons.get(e['type'], '❓')} {e['type'].capitalize()}")
             self.setItem(i, 1, type_item)
             self.setItem(i, 2, QTableWidgetItem(e["original"]))
 
@@ -985,37 +615,37 @@ class ErrorTableWidget(QTableWidget):
 
             self.setItem(i, 4, QTableWidgetItem(e.get("message", "")))
 
+            # Decision label
             decision_label = QLabel("Pending")
             decision_label.setAlignment(Qt.AlignCenter)
             decision_label.setObjectName("decisionLabel")
             self.setCellWidget(i, 5, decision_label)
 
+            # Action buttons
             aw = QWidget()
             al = QHBoxLayout(aw)
             al.setContentsMargins(2, 2, 2, 2)
             al.setSpacing(3)
 
-            btn_accept = QPushButton("OK")
+            btn_accept = QPushButton("✓")
             btn_accept.setFixedSize(30, 28)
             btn_accept.setToolTip("Accept suggestion")
-            btn_accept.setObjectName("successBtn")
             btn_accept.clicked.connect(lambda _, s=e["start"]: self._on_accept(s))
             al.addWidget(btn_accept)
 
-            btn_ignore = QPushButton("X")
+            btn_ignore = QPushButton("✗")
             btn_ignore.setFixedSize(30, 28)
             btn_ignore.setToolTip("Ignore this error")
-            btn_ignore.setObjectName("dangerBtn")
             btn_ignore.clicked.connect(lambda _, s=e["start"]: self._on_ignore(s))
             al.addWidget(btn_ignore)
 
-            btn_custom = QPushButton("E")
+            btn_custom = QPushButton("✎")
             btn_custom.setFixedSize(30, 28)
             btn_custom.setToolTip("Enter custom replacement")
             btn_custom.clicked.connect(lambda _, s=e["start"]: self._on_custom(s))
             al.addWidget(btn_custom)
 
-            btn_dict = QPushButton("+D")
+            btn_dict = QPushButton("📖+")
             btn_dict.setFixedSize(34, 28)
             btn_dict.setToolTip("Add original word to user dictionary")
             btn_dict.clicked.connect(lambda _, w=e["original"]: self.add_to_dict.emit(w))
@@ -1024,6 +654,7 @@ class ErrorTableWidget(QTableWidget):
             self.setCellWidget(i, 6, aw)
 
     def _update_row_state(self, start, state_key):
+        """Colour the row and update the decision label."""
         for i, e in enumerate(self._errors):
             if e["start"] == start:
                 color = self._STATE_COLORS.get(state_key, QColor(0,0,0,0))
@@ -1193,10 +824,15 @@ QFrame#separatorLine { background: #bcc0cc; max-height: 1px }
 # ═══════════════════════════════════════════════════════════════════
 
 def build_diff_html(original: str, corrected: str) -> str:
+    """Return simple HTML with <span> colouring for words that changed."""
     orig_words = original.split()
     corr_words = corrected.split()
+
+    # Simple word-level diff (longest-common-subsequence style)
+    from difflib import SequenceMatcher
     sm = SequenceMatcher(None, orig_words, corr_words)
-    parts: list = []
+
+    parts: list[str] = []
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == "equal":
             parts.append(" ".join(orig_words[i1:i2]))
@@ -1211,6 +847,7 @@ def build_diff_html(original: str, corrected: str) -> str:
         elif op == "insert":
             added = " ".join(corr_words[j1:j2])
             parts.append(f'<span style="background:#a6e3a155;font-weight:bold">{added}</span>')
+
     return " ".join(parts)
 
 
@@ -1223,9 +860,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.corrector = corrector
         self.worker = None
-        self.download_worker = None
         self.current_errors = []
-        self._last_check_text = ""
+        self._last_check_text = ""        # to enable "recheck" logic
         self.settings = QSettings("NLP_Corrector", "App")
 
         self._setup_ui()
@@ -1236,6 +872,7 @@ class MainWindow(QMainWindow):
         self._update_word_list()
         self._update_live_stats()
 
+        # Live stats timer — updates char/word count as user types
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(400)
         self._stats_timer.setSingleShot(True)
@@ -1257,11 +894,11 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 8, 10, 8)
         main_layout.setSpacing(6)
 
-        # Top Bar
+        # ── Top Bar ──
         top_bar = QHBoxLayout()
         top_bar.setSpacing(12)
 
-        lang_label = QLabel("Language:")
+        lang_label = QLabel("🌐 Language:")
         lang_label.setStyleSheet("font-weight: bold")
         top_bar.addWidget(lang_label)
 
@@ -1275,7 +912,7 @@ class MainWindow(QMainWindow):
 
         top_bar.addSpacing(16)
 
-        self.theme_btn = QPushButton("Dark")
+        self.theme_btn = QPushButton("🌙 Dark")
         self.theme_btn.setCheckable(True)
         self.theme_btn.setChecked(True)
         self.theme_btn.setFixedWidth(100)
@@ -1285,28 +922,30 @@ class MainWindow(QMainWindow):
 
         top_bar.addStretch()
 
+        # Global DB stats (right-aligned)
         self.stats_label = QLabel("Ready")
         self.stats_label.setObjectName("statsLabel")
         top_bar.addWidget(self.stats_label)
 
         main_layout.addLayout(top_bar)
 
-        # Splitter
+        # ── Splitter ──
         splitter = QSplitter(Qt.Vertical)
 
-        # Editor Group
-        editor_group = QGroupBox("Input Text")
+        # ── Editor Group ──
+        editor_group = QGroupBox("✏️ Input Text")
         editor_layout = QVBoxLayout(editor_group)
         editor_layout.setSpacing(6)
 
         self.input_edit = HighlightTextEdit()
         self.input_edit.setPlaceholderText(
-            "Type or paste text here, then press F7 or click 'Check Spelling & Grammar' ..."
+            "Type or paste text here, then press F7 or click 'Check Spelling & Grammar' …"
         )
         self.input_edit.suggestion_requested.connect(self._on_context_suggestion)
         editor_layout.addWidget(self.input_edit)
 
-        self.live_stats_label = QLabel("0 chars  |  0 words  |  0 unknown")
+        # Live stats bar beneath editor
+        self.live_stats_label = QLabel("0 chars · 0 words · 0 unknown")
         self.live_stats_label.setObjectName("statsLabel")
         editor_layout.addWidget(self.live_stats_label)
 
@@ -1314,31 +953,31 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        self.check_btn = QPushButton("Check Spelling & Grammar")
+        self.check_btn = QPushButton("🔍 Check Spelling & Grammar")
         self.check_btn.setObjectName("primaryBtn")
         self.check_btn.setToolTip("Run interactive spell & grammar check (F7)")
         self.check_btn.clicked.connect(self._on_check)
         btn_row.addWidget(self.check_btn)
 
-        self.beam_btn = QPushButton("Beam Search")
+        self.beam_btn = QPushButton("🔮 Beam Search")
         self.beam_btn.setToolTip("Auto-correct using beam-search decoding")
         self.beam_btn.clicked.connect(self._on_beam)
         btn_row.addWidget(self.beam_btn)
 
-        self.mcts_btn = QPushButton("MCTS")
+        self.mcts_btn = QPushButton("🎲 MCTS")
         self.mcts_btn.setToolTip("Auto-correct using Monte-Carlo tree search")
         self.mcts_btn.clicked.connect(self._on_mcts)
         btn_row.addWidget(self.mcts_btn)
 
         btn_row.addSpacing(16)
 
-        self.clear_btn = QPushButton("Clear")
+        self.clear_btn = QPushButton("🗑 Clear")
         self.clear_btn.setObjectName("dangerBtn")
         self.clear_btn.setToolTip("Clear all text and results (Ctrl+Shift+X)")
         self.clear_btn.clicked.connect(self._on_clear)
         btn_row.addWidget(self.clear_btn)
 
-        self.save_btn = QPushButton("Save")
+        self.save_btn = QPushButton("💾 Save")
         self.save_btn.setObjectName("successBtn")
         self.save_btn.setToolTip("Save current input text to a file (Ctrl+S)")
         self.save_btn.clicked.connect(self._on_save)
@@ -1348,21 +987,22 @@ class MainWindow(QMainWindow):
         editor_layout.addLayout(btn_row)
         splitter.addWidget(editor_group)
 
-        # Result Tabs
+        # ── Result Tabs ──
         self.result_tabs = QTabWidget()
 
-        # Tab: Interactive
+        # — Tab: Interactive —
         interactive_widget = QWidget()
         interactive_layout = QVBoxLayout(interactive_widget)
         interactive_layout.setSpacing(6)
 
+        # Navigation row
         nav_row = QHBoxLayout()
-        self.prev_err_btn = QPushButton("Previous Error")
+        self.prev_err_btn = QPushButton("▲ Previous Error")
         self.prev_err_btn.setToolTip("Jump to previous error in text")
         self.prev_err_btn.clicked.connect(self._on_prev_error)
         nav_row.addWidget(self.prev_err_btn)
 
-        self.next_err_btn = QPushButton("Next Error")
+        self.next_err_btn = QPushButton("▼ Next Error")
         self.next_err_btn.setToolTip("Jump to next error in text")
         self.next_err_btn.clicked.connect(self._on_next_error)
         nav_row.addWidget(self.next_err_btn)
@@ -1370,6 +1010,7 @@ class MainWindow(QMainWindow):
         self.err_count_label = QLabel("No errors")
         self.err_count_label.setObjectName("statsLabel")
         nav_row.addWidget(self.err_count_label)
+
         nav_row.addStretch()
         interactive_layout.addLayout(nav_row)
 
@@ -1382,13 +1023,13 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
 
-        self.accept_all_btn = QPushButton("Accept All")
+        self.accept_all_btn = QPushButton("✓ Accept All")
         self.accept_all_btn.setObjectName("successBtn")
         self.accept_all_btn.setToolTip("Accept all suggestions at once")
         self.accept_all_btn.clicked.connect(self._on_accept_all)
         action_row.addWidget(self.accept_all_btn)
 
-        self.ignore_all_btn = QPushButton("Ignore All")
+        self.ignore_all_btn = QPushButton("✗ Ignore All")
         self.ignore_all_btn.setObjectName("dangerBtn")
         self.ignore_all_btn.setToolTip("Ignore all errors at once")
         self.ignore_all_btn.clicked.connect(self._on_ignore_all)
@@ -1396,13 +1037,13 @@ class MainWindow(QMainWindow):
 
         action_row.addSpacing(20)
 
-        self.apply_btn = QPushButton("Apply Corrections")
+        self.apply_btn = QPushButton("✨ Apply Corrections")
         self.apply_btn.setObjectName("primaryBtn")
         self.apply_btn.setToolTip("Apply accepted corrections to the text (Ctrl+Enter)")
         self.apply_btn.clicked.connect(self._on_apply)
         action_row.addWidget(self.apply_btn)
 
-        self.recheck_btn = QPushButton("Re-check")
+        self.recheck_btn = QPushButton("🔄 Re-check")
         self.recheck_btn.setObjectName("accentBtn")
         self.recheck_btn.setToolTip("Re-run the check on the updated text")
         self.recheck_btn.clicked.connect(self._on_check)
@@ -1412,9 +1053,9 @@ class MainWindow(QMainWindow):
         action_row.addStretch()
         interactive_layout.addLayout(action_row)
 
-        self._interactive_tab_idx = self.result_tabs.addTab(interactive_widget, "Interactive")
+        self._interactive_tab_idx = self.result_tabs.addTab(interactive_widget, "✏️ Interactive")
 
-        # Tab: Auto-Corrected
+        # — Tab: Auto-Corrected —
         output_widget = QWidget()
         output_layout = QVBoxLayout(output_widget)
         output_layout.setSpacing(6)
@@ -1422,65 +1063,59 @@ class MainWindow(QMainWindow):
         self.output_edit = QTextEdit()
         self.output_edit.setReadOnly(True)
         self.output_edit.setFont(QFont("Consolas", 11))
-        self.output_edit.setPlaceholderText("Auto-corrected text will appear here ...")
+        self.output_edit.setPlaceholderText("Auto-corrected text will appear here …")
         output_layout.addWidget(self.output_edit)
 
         out_btn_row = QHBoxLayout()
-        self.score_label = QLabel("Score: --")
+        self.score_label = QLabel("Score: —")
         self.score_label.setObjectName("statsLabel")
         out_btn_row.addWidget(self.score_label)
+
         out_btn_row.addStretch()
 
-        self.copy_corrected_btn = QPushButton("Copy to Clipboard")
+        self.copy_corrected_btn = QPushButton("📋 Copy to Clipboard")
         self.copy_corrected_btn.setToolTip("Copy the corrected text to the clipboard")
         self.copy_corrected_btn.clicked.connect(self._on_copy_corrected)
         out_btn_row.addWidget(self.copy_corrected_btn)
 
-        self.use_as_input_btn = QPushButton("Use as Input")
+        self.use_as_input_btn = QPushButton("⬆ Use as Input")
         self.use_as_input_btn.setToolTip("Copy the corrected text into the input editor for further editing")
         self.use_as_input_btn.clicked.connect(self._on_use_corrected_as_input)
         out_btn_row.addWidget(self.use_as_input_btn)
 
         output_layout.addLayout(out_btn_row)
-        self._autocorrect_tab_idx = self.result_tabs.addTab(output_widget, "Auto-Corrected")
+        self._autocorrect_tab_idx = self.result_tabs.addTab(output_widget, "📄 Auto-Corrected")
 
-        # Tab: Database
+        # — Tab: Database —
         db_widget = QWidget()
         db_layout = QVBoxLayout(db_widget)
         db_layout.setSpacing(8)
 
-        # Download + Import row
-        dl_import_row = QHBoxLayout()
-        self.download_btn = QPushButton("Download 50k Dictionary")
-        self.download_btn.setObjectName("accentBtn")
-        self.download_btn.setToolTip("Download 50k word-frequency list from GitHub for the current language")
-        self.download_btn.clicked.connect(self._on_download_dictionary)
-        dl_import_row.addWidget(self.download_btn)
-
-        self.import_btn = QPushButton("Import Corpus (.txt)")
+        # Import row
+        import_row = QHBoxLayout()
+        self.import_btn = QPushButton("📂 Import Corpus (.txt)")
         self.import_btn.setObjectName("accentBtn")
         self.import_btn.setToolTip("Import a text file to train the language model (Ctrl+O)")
         self.import_btn.clicked.connect(self._on_import_corpus)
-        dl_import_row.addWidget(self.import_btn)
-
-        dl_import_row.addStretch()
-        db_layout.addLayout(dl_import_row)
+        import_row.addWidget(self.import_btn)
+        import_row.addStretch()
+        db_layout.addLayout(import_row)
 
         # Add/Remove word
-        dict_group = QGroupBox("User Dictionary")
+        dict_group = QGroupBox("📚 User Dictionary")
         dict_layout = QHBoxLayout(dict_group)
         self.word_input = QLineEdit()
-        self.word_input.setPlaceholderText("Enter word to add / remove ...")
+        self.word_input.setPlaceholderText("Enter word to add / remove …")
         self.word_input.returnPressed.connect(self._on_add_word)
         dict_layout.addWidget(self.word_input)
 
-        self.add_word_btn = QPushButton("Add")
+        self.add_word_btn = QPushButton("➕ Add")
         self.add_word_btn.setObjectName("successBtn")
         self.add_word_btn.setToolTip("Add word to the user dictionary (Enter)")
         self.add_word_btn.clicked.connect(self._on_add_word)
         dict_layout.addWidget(self.add_word_btn)
 
-        self.remove_word_btn = QPushButton("Remove")
+        self.remove_word_btn = QPushButton("➖ Remove")
         self.remove_word_btn.setObjectName("dangerBtn")
         self.remove_word_btn.setToolTip("Remove word from the user dictionary")
         self.remove_word_btn.clicked.connect(self._on_remove_word)
@@ -1490,7 +1125,7 @@ class MainWindow(QMainWindow):
         # Search filter + list
         filter_row = QHBoxLayout()
         self.dict_filter_input = QLineEdit()
-        self.dict_filter_input.setPlaceholderText("Filter words ...")
+        self.dict_filter_input.setPlaceholderText("🔍 Filter words …")
         self.dict_filter_input.textChanged.connect(self._on_filter_words)
         filter_row.addWidget(self.dict_filter_input)
         db_layout.addLayout(filter_row)
@@ -1503,47 +1138,45 @@ class MainWindow(QMainWindow):
         self.db_info_label.setObjectName("statsLabel")
         db_layout.addWidget(self.db_info_label)
 
-        self._db_tab_idx = self.result_tabs.addTab(db_widget, "Database")
+        self._db_tab_idx = self.result_tabs.addTab(db_widget, "🗄 Database")
 
         splitter.addWidget(self.result_tabs)
         splitter.setSizes([420, 380])
         main_layout.addWidget(splitter)
 
-        # Progress bar
+        # ── Progress bar (thin, unobtrusive) ──
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(4)
         main_layout.addWidget(self.progress)
 
-        # Status bar
+        # ── Status bar ──
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.status.showMessage("Ready -- Select a language and start typing  |  F7 = Check  |  Ctrl+Enter = Apply")
+        self.status.showMessage("Ready — Select a language and start typing  |  F7 = Check  |  Ctrl+Enter = Apply")
 
     def _setup_menu(self):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("&File")
-        file_menu.addAction("Import Corpus ...", self._on_import_corpus, QKeySequence("Ctrl+O"))
-        file_menu.addAction("Save Text ...", self._on_save, QKeySequence("Ctrl+S"))
+        file_menu.addAction("📂 Import Corpus …", self._on_import_corpus, QKeySequence("Ctrl+O"))
+        file_menu.addAction("💾 Save Text …", self._on_save, QKeySequence("Ctrl+S"))
         file_menu.addSeparator()
         file_menu.addAction("Exit", self.close, QKeySequence("Ctrl+Q"))
 
         edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction("Check Spelling & Grammar", self._on_check, QKeySequence("F7"))
-        edit_menu.addAction("Apply Corrections", self._on_apply, QKeySequence("Ctrl+Return"))
+        edit_menu.addAction("🔍 Check Spelling & Grammar", self._on_check, QKeySequence("F7"))
+        edit_menu.addAction("✨ Apply Corrections", self._on_apply, QKeySequence("Ctrl+Return"))
         edit_menu.addSeparator()
-        edit_menu.addAction("Clear All", self._on_clear, QKeySequence("Ctrl+Shift+X"))
-
-        tools_menu = menubar.addMenu("&Tools")
-        tools_menu.addAction("Download Dictionary for Current Language", self._on_download_dictionary)
+        edit_menu.addAction("🗑 Clear All", self._on_clear, QKeySequence("Ctrl+Shift+X"))
 
         help_menu = menubar.addMenu("&Help")
         help_menu.addAction("About", self._on_about)
         help_menu.addAction("Keyboard Shortcuts", self._on_shortcuts)
 
     def _setup_shortcuts(self):
+        # Extra shortcuts not in menu
         pass
 
     # ────────────────────────────────────────────────────
@@ -1565,7 +1198,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_theme(self, checked: bool):
         self._apply_theme(checked)
-        self.theme_btn.setText("Dark" if checked else "Light")
+        self.theme_btn.setText("🌙 Dark" if checked else "☀ Light")
 
     def _apply_theme(self, dark: bool):
         QApplication.instance().setStyleSheet(DARK_STYLE if dark else LIGHT_STYLE)
@@ -1593,7 +1226,7 @@ class MainWindow(QMainWindow):
         gr = len(profile.grammar_rules)
         cp = len(profile.confusion_pairs)
         self.db_info_label.setText(
-            f"DB: {db.db_path}  |  {wc:,} words  |  {uw} user  |  {gr} rules  |  {cp} pairs  |  {sz:.2f} MB"
+            f"📂 {db.db_path}  |  {wc:,} words  |  {uw} user  |  {gr} rules  |  {cp} pairs  |  {sz:.2f} MB"
         )
         self.stats_label.setText(
             f"Lang: {self.corrector.current_lang.upper()}  |  Words: {wc:,}  |  Rules: {gr}  |  Pairs: {cp}  |  DB: {sz:.2f} MB"
@@ -1615,14 +1248,18 @@ class MainWindow(QMainWindow):
         text = self.input_edit.toPlainText()
         stats = self.corrector.get_stats(text)
         self.live_stats_label.setText(
-            f"{stats['chars']} chars  |  {stats['words']} words  |  {stats['unknown_words']} unknown"
+            f"{stats['chars']} chars  ·  {stats['words']} words  ·  {stats['unknown_words']} unknown"
         )
+
+    # ────────────────────────────────────────────────────
+    # Tab Badge Helper
+    # ────────────────────────────────────────────────────
 
     def _set_interactive_tab_badge(self, count: int):
         if count > 0:
-            self.result_tabs.setTabText(self._interactive_tab_idx, f"Interactive ({count})")
+            self.result_tabs.setTabText(self._interactive_tab_idx, f"✏️ Interactive ({count})")
         else:
-            self.result_tabs.setTabText(self._interactive_tab_idx, "Interactive")
+            self.result_tabs.setTabText(self._interactive_tab_idx, "✏️ Interactive")
 
     # ────────────────────────────────────────────────────
     # Correction Actions
@@ -1652,12 +1289,12 @@ class MainWindow(QMainWindow):
 
     def _start_worker(self, text, mode, **kwargs):
         if self.worker and self.worker.isRunning():
-            self.status.showMessage("A correction is already in progress ...")
+            self.status.showMessage("A correction is already in progress …")
             return
         self._set_buttons_enabled(False)
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
-        self.status.showMessage(f"Running {mode} correction ...")
+        self.status.showMessage(f"Running {mode} correction …")
         self.worker = CorrectionWorker(self.corrector, text, mode, **kwargs)
         self.worker.progress.connect(lambda msg: self.status.showMessage(msg))
         self.worker.finished.connect(self._on_worker_finished)
@@ -1665,7 +1302,7 @@ class MainWindow(QMainWindow):
 
     def _set_buttons_enabled(self, enabled: bool):
         for btn in (self.check_btn, self.beam_btn, self.mcts_btn, self.apply_btn,
-                    self.accept_all_btn, self.ignore_all_btn, self.download_btn, self.import_btn):
+                    self.accept_all_btn, self.ignore_all_btn):
             btn.setEnabled(enabled)
 
     def _on_worker_finished(self, result: Dict):
@@ -1685,22 +1322,27 @@ class MainWindow(QMainWindow):
             self.err_count_label.setText(f"{len(self.current_errors)} error(s) found")
             self.result_tabs.setCurrentIndex(self._interactive_tab_idx)
             self.recheck_btn.setVisible(True)
+
+            # Auto-select first error if any
             if self.current_errors:
                 e = self.current_errors[0]
                 self.input_edit.select_range(e["start"], e["end"])
                 self.error_table.selectRow(0)
+
             self.status.showMessage(
-                f"Found {len(self.current_errors)} issue(s).  Review -> Apply (Ctrl+Enter)"
+                f"Found {len(self.current_errors)} issue(s).  Review → Apply (Ctrl+Enter)"
             )
 
         elif "corrected" in result:
             original = self.input_edit.toPlainText()
             corrected = result["corrected"]
+            # Build diff HTML
             diff_html = build_diff_html(original, corrected)
             self.output_edit.setHtml(
                 f"<pre style='font-family:Consolas,monospace;font-size:11pt;"
                 f"white-space:pre-wrap;word-wrap:break-word'>{diff_html}</pre>"
             )
+            # Also store plain text for copy
             self._last_corrected_plain = corrected
             self.score_label.setText(f"Score: {result['score']:.6f}")
             self.result_tabs.setCurrentIndex(self._autocorrect_tab_idx)
@@ -1712,9 +1354,9 @@ class MainWindow(QMainWindow):
                 self._update_db_stats()
                 self._update_word_list()
                 self._update_live_stats()
-                self.status.showMessage(f"{msg}")
+                self.status.showMessage(f"✓ {msg}")
             else:
-                self.status.showMessage(f"{msg}")
+                self.status.showMessage(f"✗ {msg}")
                 QMessageBox.warning(self, "Import Error", msg)
 
     # ────────────────────────────────────────────────────
@@ -1730,7 +1372,7 @@ class MainWindow(QMainWindow):
 
     def _on_accept_all(self):
         self.error_table.accept_all()
-        self.status.showMessage("All suggestions accepted. Press 'Apply Corrections' to commit.")
+        self.status.showMessage("✓ All suggestions accepted.  Press 'Apply Corrections' to commit.")
 
     def _on_ignore_all(self):
         self.error_table.ignore_all()
@@ -1740,7 +1382,7 @@ class MainWindow(QMainWindow):
         text = self.input_edit.toPlainText()
         decisions = self.error_table.get_decisions()
         if not decisions:
-            self.status.showMessage("No corrections to apply -- accept or ignore some errors first.")
+            self.status.showMessage("No corrections to apply — accept or ignore some errors first.")
             return
         corrected = TextCorrector.apply_corrections(text, self.current_errors, decisions)
         self.input_edit.setPlainText(corrected)
@@ -1750,7 +1392,7 @@ class MainWindow(QMainWindow):
         self._set_interactive_tab_badge(0)
         self.err_count_label.setText("No errors")
         self._update_live_stats()
-        self.status.showMessage("Corrections applied! Click 'Re-check' to verify.")
+        self.status.showMessage("✓ Corrections applied!  Click 'Re-check' to verify.")
 
     def _on_error_double_clicked(self, row: int):
         error = self.error_table.get_error_at_row(row)
@@ -1768,32 +1410,39 @@ class MainWindow(QMainWindow):
         if not self.current_errors:
             return
         cursor_pos = self.input_edit.textCursor().position()
-        if direction > 0:
+        # Find closest error in the given direction
+        if direction > 0:  # next
             for e in self.current_errors:
                 if e["start"] > cursor_pos:
                     self.input_edit.select_range(e["start"], e["end"])
+                    # Select corresponding table row
                     row = self.current_errors.index(e)
                     self.error_table.selectRow(row)
                     return
+            # Wrap to first
             self.input_edit.select_range(self.current_errors[0]["start"], self.current_errors[0]["end"])
             self.error_table.selectRow(0)
-        else:
+        else:  # previous
             for e in reversed(self.current_errors):
                 if e["end"] < cursor_pos:
                     self.input_edit.select_range(e["start"], e["end"])
                     row = self.current_errors.index(e)
                     self.error_table.selectRow(row)
                     return
+            # Wrap to last
             last = self.current_errors[-1]
             self.input_edit.select_range(last["start"], last["end"])
             self.error_table.selectRow(len(self.current_errors) - 1)
 
     def _on_context_suggestion(self, start: int, end: int, replacement: str):
+        """Handle a suggestion chosen from the editor's right-click context menu."""
         cursor = self.input_edit.textCursor()
         cursor.setPosition(start)
         cursor.setPosition(end, QTextCursor.KeepAnchor)
         cursor.insertText(replacement)
+        # Re-highlight remaining errors
         self.input_edit.clear_highlights()
+        # Re-run check to update error positions
         self._on_check()
 
     def _on_add_word_from_error(self, word: str):
@@ -1810,47 +1459,13 @@ class MainWindow(QMainWindow):
     def _on_copy_corrected(self):
         text = getattr(self, "_last_corrected_plain", self.output_edit.toPlainText())
         QApplication.clipboard().setText(text)
-        self.status.showMessage("Corrected text copied to clipboard.")
+        self.status.showMessage("✓ Corrected text copied to clipboard.")
 
     def _on_use_corrected_as_input(self):
         text = getattr(self, "_last_corrected_plain", self.output_edit.toPlainText())
         self.input_edit.setPlainText(text)
         self._update_live_stats()
         self.status.showMessage("Corrected text moved to input editor. You can re-check it now.")
-
-    # ────────────────────────────────────────────────────
-    # Download Dictionary
-    # ────────────────────────────────────────────────────
-
-    def _on_download_dictionary(self):
-        lang = self.corrector.current_lang
-        if self.download_worker and self.download_worker.isRunning():
-            self.status.showMessage("Download already in progress ...")
-            return
-        self._set_buttons_enabled(False)
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        self.download_worker = DownloadWorker(self.corrector, lang)
-        self.download_worker.progress.connect(lambda msg: self.status.showMessage(msg))
-        self.download_worker.finished.connect(self._on_download_finished)
-        self.download_worker.start()
-
-    def _on_download_finished(self, result: Dict):
-        self._set_buttons_enabled(True)
-        self.progress.setVisible(False)
-        if "error" in result:
-            self.status.showMessage(f"Download error: {result['error']}")
-            QMessageBox.critical(self, "Download Error", result["error"])
-            return
-        ok = result.get("download_ok", False)
-        msg = result.get("download_msg", "")
-        if ok:
-            self._update_db_stats()
-            self._update_word_list()
-            self._update_live_stats()
-            self.status.showMessage(f"Done: {msg}")
-        else:
-            self.status.showMessage(f"Skipped: {msg}")
 
     # ────────────────────────────────────────────────────
     # Dictionary Actions
@@ -1869,6 +1484,7 @@ class MainWindow(QMainWindow):
     def _on_remove_word(self):
         word = self.word_input.text().strip()
         if not word:
+            # Try selected word from list
             item = self.word_list.currentItem()
             if item:
                 word = item.text()
@@ -1904,7 +1520,7 @@ class MainWindow(QMainWindow):
         if not path: return
         try:
             Path(path).write_text(text, encoding="utf-8")
-            self.status.showMessage(f"Saved to {path}")
+            self.status.showMessage(f"✓ Saved to {path}")
         except Exception as e:
             QMessageBox.warning(self, "Save Error", str(e))
 
@@ -1940,17 +1556,12 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self, "About",
             "<h2>Advanced NLP Text Corrector</h2>"
-            "<p>Self-contained single-file application.</p>"
-            "<p>Features:</p>"
-            "<ul>"
-            "<li>20 languages with isolated SQLite databases</li>"
-            "<li>BK-tree + Levenshtein spell checking</li>"
-            "<li>Grammar rules &amp; confusion pairs (embedded)</li>"
-            "<li>Interactive, Beam Search &amp; MCTS correction</li>"
-            "<li>User dictionary management</li>"
-            "<li>Download 50k word lists from GitHub</li>"
-            "<li>Dark / Light themes</li>"
-            "</ul>"
+            "<p>• 20 languages with isolated databases<br>"
+            "• BK-tree + Levenshtein spell checking<br>"
+            "• Grammar rules &amp; confusion pairs from DB<br>"
+            "• Interactive, Beam Search &amp; MCTS correction<br>"
+            "• User dictionary management<br>"
+            "• Dark / Light themes</p>"
             "<p>Databases stored in <code>./database/</code></p>",
         )
 
@@ -1986,7 +1597,7 @@ class MainWindow(QMainWindow):
 
 def main():
     setup_logging()
-    logger.info("Starting NLP Text Corrector (self-contained) ...")
+    logger.info("Starting NLP Text Corrector …")
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
